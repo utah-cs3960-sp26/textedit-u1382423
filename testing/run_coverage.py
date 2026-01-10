@@ -4,6 +4,9 @@ import subprocess
 import sys
 import os
 
+# Change to the testing directory
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
+
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 
 # Define test batches - split to avoid Qt cleanup issues
@@ -33,7 +36,7 @@ for i, batch in enumerate(batches):
     cmd = [sys.executable, '-m', 'coverage', 'run']
     if i > 0:
         cmd.append('--append')
-    cmd.extend(['--source=text_editor', '-m', 'pytest', '-q', '--tb=no'] + test_args)
+    cmd.extend(['--source=../text_editor', '-m', 'pytest', '-q', '--tb=no'] + test_args)
     
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     print(result.stdout, end='')

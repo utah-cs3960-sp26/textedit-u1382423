@@ -8,4 +8,4 @@ source "$(dirname "$0")/venv/bin/activate"
 export QT_QPA_PLATFORM=offscreen
 
 echo "Environment ready. Run tests with:"
-echo "   pytest test_text_editor.py -v"
+echo "   pytest testing/test_text_editor.py -v"
