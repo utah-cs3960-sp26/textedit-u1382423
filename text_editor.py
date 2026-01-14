@@ -624,13 +624,11 @@ class CodeEditor(QPlainTextEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.current_file = None
-        self.is_modified = False
         self.current_language = None
         self.highlighter = None
         
         self._setup_editor()
         self._setup_line_numbers()
-        self._setup_signals()
         self._setup_highlighter()
     
     def _setup_editor(self):
@@ -652,10 +650,6 @@ class CodeEditor(QPlainTextEdit):
         self.cursorPositionChanged.connect(self.match_brackets)
         self.update_line_number_area_width(0)
     
-    def _setup_signals(self):
-        """Set up document modification tracking."""
-        self.textChanged.connect(self._on_text_changed)
-    
     def _setup_highlighter(self):
         """Set up syntax highlighter."""
         self.highlighter = SyntaxHighlighter(self.document())
@@ -671,9 +665,15 @@ class CodeEditor(QPlainTextEdit):
         language = get_language_for_file(file_path)
         self.set_language(language)
     
-    def _on_text_changed(self):
-        """Track document modifications."""
-        self.is_modified = True
+    @property
+    def is_modified(self):
+        """Check if document has been modified."""
+        return self.document().isModified()
+    
+    @is_modified.setter
+    def is_modified(self, value):
+        """Set document modification state."""
+        self.document().setModified(value)
     
     def line_number_area_width(self):
         """Calculate width needed for line numbers."""
@@ -807,6 +807,18 @@ class CodeEditor(QPlainTextEdit):
         key = event.key()
         text = event.text()
         cursor = self.textCursor()
+        
+        if key == Qt.Key_Up:
+            if cursor.blockNumber() == 0:
+                cursor.movePosition(QTextCursor.StartOfLine)
+                self.setTextCursor(cursor)
+                return
+        
+        if key == Qt.Key_Down:
+            if cursor.blockNumber() == self.document().blockCount() - 1:
+                cursor.movePosition(QTextCursor.EndOfLine)
+                self.setTextCursor(cursor)
+                return
         
         if key == Qt.Key_Return or key == Qt.Key_Enter:
             self._handle_enter(cursor)
@@ -954,7 +966,7 @@ class FileTreeView(QTreeView):
         super().__init__(parent)
         self.model = QFileSystemModel()
         self.model.setRootPath(QDir.homePath())
-        self.model.setFilter(QDir.AllEntries | QDir.NoDotAndDotDot | QDir.Hidden)
+        self.model.setFilter(QDir.AllEntries | QDir.NoDotAndDotDot)
         
         self.setModel(self.model)
         self.setRootIndex(self.model.index(QDir.homePath()))
@@ -981,6 +993,25 @@ class FileTreeView(QTreeView):
     def is_directory(self, index):
         """Check if index is a directory."""
         return self.model.isDir(index)
+    
+    def select_file(self, file_path):
+        """Select and highlight a file in the tree, expanding parent directories."""
+        if not file_path or not os.path.exists(file_path):
+            return
+        
+        index = self.model.index(file_path)
+        if not index.isValid():
+            return
+        
+        self.collapseAll()
+        
+        parent = index.parent()
+        while parent.isValid():
+            self.expand(parent)
+            parent = parent.parent()
+        
+        self.setCurrentIndex(index)
+        self.scrollTo(index)
 
 
 class TextEditor(QMainWindow):
@@ -1118,6 +1149,7 @@ class TextEditor(QMainWindow):
         toolbar.addAction("New", self._new_file)
         toolbar.addAction("Open", self._open_file)
         toolbar.addAction("Save", self._save_file)
+        toolbar.addAction("Save As", self._save_file_as)
         toolbar.addSeparator()
         toolbar.addAction("Undo", self.editor.undo)
         toolbar.addAction("Redo", self.editor.redo)
@@ -1132,7 +1164,8 @@ class TextEditor(QMainWindow):
     
     def _setup_shortcuts(self):
         """Set up additional keyboard shortcuts."""
-        pass
+        redo_shortcut = QShortcut(QKeySequence("Ctrl+Y"), self)
+        redo_shortcut.activated.connect(self.editor.redo)
     
     def _apply_dark_theme(self):
         """Apply dark theme styling."""
@@ -1251,6 +1284,7 @@ class TextEditor(QMainWindow):
             self.editor.is_modified = False
             self.setWindowTitle("Text Editor - New File")
             self._update_language_status()
+            self.editor.update_line_number_area_width(0)
     
     def _open_file(self):
         """Open a file dialog to select a file."""
@@ -1277,6 +1311,8 @@ class TextEditor(QMainWindow):
             self.editor.is_modified = False
             self.setWindowTitle(f"Text Editor - {os.path.basename(file_path)}")
             self._update_language_status()
+            self.editor.update_line_number_area_width(0)
+            self.file_tree.select_file(file_path)
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Could not open file:\n{str(e)}")
     
@@ -1295,12 +1331,33 @@ class TextEditor(QMainWindow):
     
     def _save_file_as(self):
         """Save file with a new name."""
-        file_path, _ = QFileDialog.getSaveFileName(
-            self, "Save File", "",
-            "All Files (*);;Text Files (*.txt);;Python Files (*.py)"
-        )
-        if file_path:
-            self._save_to_path(file_path)
+        dialog = QFileDialog(self, "Save File")
+        dialog.setAcceptMode(QFileDialog.AcceptSave)
+        dialog.setNameFilters(["All Files (*)", "Text Files (*.txt)", "Python Files (*.py)"])
+        dialog.setOption(QFileDialog.ShowDirsOnly, False)
+        dialog.setOption(QFileDialog.DontUseNativeDialog, True)
+        
+        from PyQt5.QtWidgets import QPushButton
+        new_folder_btn = QPushButton("New Folder")
+        new_folder_btn.clicked.connect(lambda: self._create_new_folder(dialog))
+        dialog.layout().addWidget(new_folder_btn)
+        
+        if dialog.exec_() == QFileDialog.Accepted:
+            file_path = dialog.selectedFiles()[0]
+            if file_path:
+                self._save_to_path(file_path)
+    
+    def _create_new_folder(self, dialog):
+        """Create a new folder in the current directory of the file dialog."""
+        current_dir = dialog.directory().absolutePath()
+        folder_name, ok = QInputDialog.getText(self, "New Folder", "Folder name:")
+        if ok and folder_name:
+            new_folder_path = os.path.join(current_dir, folder_name)
+            try:
+                os.makedirs(new_folder_path, exist_ok=True)
+                dialog.setDirectory(new_folder_path)
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Could not create folder:\n{str(e)}")
     
     def _save_to_path(self, file_path):
         """Save content to a specific path."""
