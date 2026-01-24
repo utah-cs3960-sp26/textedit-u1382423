@@ -1256,7 +1256,11 @@ class FileTreeView(QTreeView):
         return self.model.isDir(index)
     
     def select_file(self, file_path):
-        """Select and highlight a file in the tree, expanding parent directories."""
+        """Select and highlight a file in the tree, expanding parent directories.
+        
+        Only collapses directories that are not ancestors of the target file,
+        preventing flicker when selecting a file in an already-open path.
+        """
         if not file_path or not os.path.exists(file_path):
             return
         
@@ -1264,8 +1268,17 @@ class FileTreeView(QTreeView):
         if not index.isValid():
             return
         
-        self.collapseAll()
+        # Collect all ancestor indices of the target file
+        ancestors = set()
+        parent = index.parent()
+        while parent.isValid():
+            ancestors.add(parent)
+            parent = parent.parent()
         
+        # Collapse only directories that are not ancestors of the target
+        self._collapse_non_ancestors(self.rootIndex(), ancestors)
+        
+        # Expand all ancestors from root to file
         parent = index.parent()
         while parent.isValid():
             self.expand(parent)
@@ -1273,6 +1286,21 @@ class FileTreeView(QTreeView):
         
         self.setCurrentIndex(index)
         self.scrollTo(index)
+    
+    def _collapse_non_ancestors(self, parent_index, ancestors):
+        """Recursively collapse directories that are not ancestors of the target file."""
+        row_count = self.model.rowCount(parent_index)
+        for row in range(row_count):
+            child_index = self.model.index(row, 0, parent_index)
+            if not child_index.isValid():
+                continue
+            if self.model.isDir(child_index):
+                if child_index in ancestors:
+                    # Recurse into ancestors to collapse their non-ancestor children
+                    self._collapse_non_ancestors(child_index, ancestors)
+                else:
+                    # Collapse non-ancestor directories
+                    self.collapse(child_index)
 
 
 class TextEditor(QMainWindow):
@@ -1715,6 +1743,7 @@ class TextEditor(QMainWindow):
             self.editor.is_modified = False
             self.setWindowTitle(f"Text Editor - {os.path.basename(file_path)}")
             self.statusbar.showMessage("File saved", 3000)
+            self.file_tree.select_file(file_path)
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Could not save file:\n{str(e)}")
     
