@@ -1256,27 +1256,13 @@ class FileTreeView(QTreeView):
         return self.model.isDir(index)
     
     def select_file(self, file_path):
-        """Select and highlight a file in the tree, expanding parent directories.
-        
-        Only collapses directories that are not ancestors of the target file,
-        preventing flicker when selecting a file in an already-open path.
-        """
+        """Select and highlight a file in the tree, expanding parent directories."""
         if not file_path or not os.path.exists(file_path):
             return
         
         index = self.model.index(file_path)
         if not index.isValid():
             return
-        
-        # Collect all ancestor indices of the target file
-        ancestors = set()
-        parent = index.parent()
-        while parent.isValid():
-            ancestors.add(parent)
-            parent = parent.parent()
-        
-        # Collapse only directories that are not ancestors of the target
-        self._collapse_non_ancestors(self.rootIndex(), ancestors)
         
         # Expand all ancestors from root to file
         parent = index.parent()
@@ -1286,6 +1272,28 @@ class FileTreeView(QTreeView):
         
         self.setCurrentIndex(index)
         self.scrollTo(index)
+    
+    def cleanup_explorer(self, current_file_path):
+        """Collapse all directories except for ancestors of the current file."""
+        if not current_file_path or not os.path.exists(current_file_path):
+            # If no file is open, collapse everything
+            self.collapseAll()
+            return
+        
+        index = self.model.index(current_file_path)
+        if not index.isValid():
+            self.collapseAll()
+            return
+        
+        # Collect all ancestor indices of the current file
+        ancestors = set()
+        parent = index.parent()
+        while parent.isValid():
+            ancestors.add(parent)
+            parent = parent.parent()
+        
+        # Collapse only directories that are not ancestors of the current file
+        self._collapse_non_ancestors(self.rootIndex(), ancestors)
     
     def _collapse_non_ancestors(self, parent_index, ancestors):
         """Recursively collapse directories that are not ancestors of the target file."""
@@ -1362,6 +1370,12 @@ class TextEditor(QMainWindow):
         open_folder_action.setShortcut("Ctrl+Shift+O")
         open_folder_action.triggered.connect(self._open_folder)
         file_menu.addAction(open_folder_action)
+        
+        file_menu.addSeparator()
+        
+        cleanup_explorer_action = QAction("&Cleanup File Explorer", self)
+        cleanup_explorer_action.triggered.connect(self._cleanup_file_explorer)
+        file_menu.addAction(cleanup_explorer_action)
         
         file_menu.addSeparator()
         
@@ -1562,6 +1576,11 @@ class TextEditor(QMainWindow):
         if not self.file_tree.is_directory(index):
             file_path = self.file_tree.get_file_path(index)
             self._open_file_path(file_path)
+    
+    def _cleanup_file_explorer(self):
+        """Collapse all file explorer directories except for the current file's path."""
+        current_file = self.editor.current_file
+        self.file_tree.cleanup_explorer(current_file)
     
     def _new_file(self):
         """Create a new file."""

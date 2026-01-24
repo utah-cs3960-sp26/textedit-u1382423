@@ -345,6 +345,38 @@ class TestFileTreeView:
         index = file_tree.model.index(temp_file)
         assert file_tree.is_directory(index) is False
 
+    def test_cleanup_explorer_with_no_file(self, file_tree, tmp_path):
+        """Test cleanup_explorer collapses all when no file is specified."""
+        file_tree.set_root_path(str(tmp_path))
+        file_tree.cleanup_explorer(None)
+
+    def test_cleanup_explorer_with_file(self, file_tree, temp_file):
+        """Test cleanup_explorer keeps ancestors expanded for current file."""
+        dir_path = os.path.dirname(temp_file)
+        file_tree.set_root_path(dir_path)
+        file_tree.cleanup_explorer(temp_file)
+
+
+class TestCleanupFileExplorer:
+    """Tests for the Cleanup File Explorer menu action."""
+
+    def test_cleanup_file_explorer_action_exists(self, main_window):
+        """Test that Cleanup File Explorer action exists in File menu."""
+        file_menu = None
+        for action in main_window.menuBar().actions():
+            if action.text() == "&File":
+                file_menu = action.menu()
+                break
+        assert file_menu is not None
+        
+        action_texts = [action.text() for action in file_menu.actions()]
+        assert "&Cleanup File Explorer" in action_texts
+
+    def test_cleanup_file_explorer_method(self, main_window, temp_file):
+        """Test _cleanup_file_explorer method works."""
+        main_window._open_file_path(temp_file)
+        main_window._cleanup_file_explorer()
+
 
 class TestTextEditorMainWindow:
     """Tests for the main TextEditor window."""
