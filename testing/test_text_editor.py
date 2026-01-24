@@ -1204,5 +1204,61 @@ class TestFindReplaceDialog:
         assert cursor.position() > 12
 
 
+class TestThemeToggle:
+    """Tests for light/dark theme toggle functionality."""
+    
+    @pytest.mark.timeout(30)
+    def test_initial_dark_mode(self, main_window, qtbot):
+        """Test that editor starts in dark mode."""
+        assert main_window.dark_mode is True
+        assert "Switch to &Light Mode" in main_window.toggle_theme_action.text()
+    
+    @pytest.mark.timeout(30)
+    def test_toggle_to_light_mode(self, main_window, qtbot):
+        """Test toggling from dark to light mode."""
+        main_window._toggle_theme()
+        assert main_window.dark_mode is False
+        assert "Switch to &Dark Mode" in main_window.toggle_theme_action.text()
+    
+    @pytest.mark.timeout(30)
+    def test_toggle_back_to_dark_mode(self, main_window, qtbot):
+        """Test toggling from light back to dark mode."""
+        main_window._toggle_theme()  # to light
+        main_window._toggle_theme()  # back to dark
+        assert main_window.dark_mode is True
+        assert "Switch to &Light Mode" in main_window.toggle_theme_action.text()
+    
+    @pytest.mark.timeout(30)
+    def test_theme_action_in_view_menu(self, main_window, qtbot):
+        """Test that theme toggle action exists in View menu."""
+        menubar = main_window.menuBar()
+        view_menu = None
+        for action in menubar.actions():
+            if action.text() == "&View":
+                view_menu = action.menu()
+                break
+        assert view_menu is not None
+        action_texts = [action.text() for action in view_menu.actions()]
+        assert any("Light Mode" in text or "Dark Mode" in text for text in action_texts)
+    
+    @pytest.mark.timeout(30)
+    def test_editor_dark_mode_sync(self, main_window, qtbot):
+        """Test that editor dark_mode syncs with main window."""
+        assert main_window.editor.dark_mode is True
+        main_window._toggle_theme()
+        assert main_window.editor.dark_mode is False
+        main_window._toggle_theme()
+        assert main_window.editor.dark_mode is True
+    
+    @pytest.mark.timeout(30)
+    def test_highlighter_dark_mode_sync(self, main_window, qtbot):
+        """Test that syntax highlighter dark_mode syncs with theme toggle."""
+        assert main_window.editor.highlighter.dark_mode is True
+        main_window._toggle_theme()
+        assert main_window.editor.highlighter.dark_mode is False
+        main_window._toggle_theme()
+        assert main_window.editor.highlighter.dark_mode is True
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

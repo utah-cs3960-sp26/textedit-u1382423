@@ -716,7 +716,7 @@ def get_language_for_file(file_path):
 class SyntaxHighlighter(QSyntaxHighlighter):
     """Multi-language syntax highlighter using static definitions."""
     
-    COLORS = {
+    DARK_COLORS = {
         'keyword': '#569cd6',
         'builtin': '#4ec9b0',
         'string': '#ce9178',
@@ -731,9 +731,25 @@ class SyntaxHighlighter(QSyntaxHighlighter):
         'property': '#9cdcfe',
     }
     
-    def __init__(self, document, language=None):
+    LIGHT_COLORS = {
+        'keyword': '#0000ff',
+        'builtin': '#267f99',
+        'string': '#a31515',
+        'comment': '#008000',
+        'number': '#098658',
+        'operator': '#1e1e1e',
+        'function': '#795e26',
+        'class': '#267f99',
+        'decorator': '#af00db',
+        'tag': '#800000',
+        'attribute': '#e50000',
+        'property': '#e50000',
+    }
+    
+    def __init__(self, document, language=None, dark_mode=True):
         super().__init__(document)
         self.language = language
+        self.dark_mode = dark_mode
         self.highlighting_rules = []
         self.multi_line_comment_start = None
         self.multi_line_comment_end = None
@@ -745,13 +761,20 @@ class SyntaxHighlighter(QSyntaxHighlighter):
     
     def _setup_formats(self):
         """Set up text formats for different token types."""
+        colors = self.DARK_COLORS if self.dark_mode else self.LIGHT_COLORS
         self.formats = {}
-        for name, color in self.COLORS.items():
+        for name, color in colors.items():
             fmt = QTextCharFormat()
             fmt.setForeground(QColor(color))
             if name == 'keyword':
                 fmt.setFontWeight(QFont.Bold)
             self.formats[name] = fmt
+    
+    def set_dark_mode(self, dark_mode):
+        """Update the color scheme for the given theme."""
+        self.dark_mode = dark_mode
+        self._setup_formats()
+        self.rehighlight()
     
     def set_language(self, language):
         """Set the language and update highlighting rules."""
@@ -887,6 +910,7 @@ class CodeEditor(QPlainTextEdit):
         self.current_language = None
         self.highlighter = None
         self.is_invalid_file = False
+        self.dark_mode = True
         
         self._setup_editor()
         self._setup_line_numbers()
@@ -925,6 +949,14 @@ class CodeEditor(QPlainTextEdit):
         """Auto-detect and set language from file extension."""
         language = get_language_for_file(file_path)
         self.set_language(language)
+    
+    def set_dark_mode(self, dark_mode):
+        """Update theme for line numbers, highlighting, and syntax colors."""
+        self.dark_mode = dark_mode
+        if self.highlighter:
+            self.highlighter.set_dark_mode(dark_mode)
+        self.highlight_current_line()
+        self.line_number_area.update()
     
     @property
     def is_modified(self):
@@ -968,7 +1000,12 @@ class CodeEditor(QPlainTextEdit):
     def line_number_area_paint_event(self, event):
         """Paint line numbers."""
         painter = QPainter(self.line_number_area)
-        painter.fillRect(event.rect(), QColor("#2b2b2b"))
+        if self.dark_mode:
+            painter.fillRect(event.rect(), QColor("#2b2b2b"))
+            line_number_color = QColor("#858585")
+        else:
+            painter.fillRect(event.rect(), QColor("#f0f0f0"))
+            line_number_color = QColor("#6e7681")
         
         block = self.firstVisibleBlock()
         block_number = block.blockNumber()
@@ -978,7 +1015,7 @@ class CodeEditor(QPlainTextEdit):
         while block.isValid() and top <= event.rect().bottom():
             if block.isVisible() and bottom >= event.rect().top():
                 number = str(block_number + 1)
-                painter.setPen(QColor("#858585"))
+                painter.setPen(line_number_color)
                 painter.drawText(
                     0, top, self.line_number_area.width() - 5,
                     self.fontMetrics().height(),
@@ -996,7 +1033,12 @@ class CodeEditor(QPlainTextEdit):
         
         if not self.isReadOnly():
             selection = QTextEdit.ExtraSelection()
-            line_color = QColor("#3a3a3a")
+            if self.dark_mode:
+                line_color = QColor("#3a3a3a")
+                bracket_color = QColor("#4a6a4a")
+            else:
+                line_color = QColor("#f5f5f5")
+                bracket_color = QColor("#c8e6c8")
             selection.format.setBackground(line_color)
             selection.format.setProperty(QTextFormat.FullWidthSelection, True)
             selection.cursor = self.textCursor()
@@ -1005,7 +1047,11 @@ class CodeEditor(QPlainTextEdit):
         
         for pos in self.bracket_positions:
             selection = QTextEdit.ExtraSelection()
-            selection.format.setBackground(QColor("#4a6a4a"))
+            if self.dark_mode:
+                bracket_color = QColor("#4a6a4a")
+            else:
+                bracket_color = QColor("#c8e6c8")
+            selection.format.setBackground(bracket_color)
             cursor = self.textCursor()
             cursor.setPosition(pos)
             cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor)
@@ -1319,6 +1365,8 @@ class TextEditor(QMainWindow):
         self.setWindowTitle("Text Editor")
         self.setGeometry(100, 100, 1200, 800)
         
+        self.dark_mode = True
+        
         self._setup_ui()
         self._setup_menu()
         self._setup_toolbar()
@@ -1443,6 +1491,13 @@ class TextEditor(QMainWindow):
         toggle_tree_action.setShortcut("Ctrl+B")
         toggle_tree_action.triggered.connect(self._toggle_file_tree)
         view_menu.addAction(toggle_tree_action)
+        
+        view_menu.addSeparator()
+        
+        self.toggle_theme_action = QAction("Switch to &Light Mode", self)
+        self.toggle_theme_action.setShortcut("Ctrl+Shift+T")
+        self.toggle_theme_action.triggered.connect(self._toggle_theme)
+        view_menu.addAction(self.toggle_theme_action)
     
     def _setup_toolbar(self):
         """Set up the toolbar."""
@@ -1558,6 +1613,109 @@ class TextEditor(QMainWindow):
                 border: none;
             }
         """)
+    
+    def _apply_light_theme(self):
+        """Apply light theme styling."""
+        self.setStyleSheet("""
+            QMainWindow, QWidget {
+                background-color: #ffffff;
+                color: #1e1e1e;
+            }
+            QPlainTextEdit {
+                background-color: #ffffff;
+                color: #1e1e1e;
+                border: none;
+                selection-background-color: #add6ff;
+            }
+            QTreeView {
+                background-color: #f3f3f3;
+                color: #1e1e1e;
+                border: none;
+            }
+            QTreeView::item:selected {
+                background-color: #0078d4;
+                color: #ffffff;
+            }
+            QTreeView::item:hover {
+                background-color: #e8e8e8;
+            }
+            QMenuBar {
+                background-color: #f0f0f0;
+                color: #1e1e1e;
+            }
+            QMenuBar::item:selected {
+                background-color: #0078d4;
+                color: #ffffff;
+            }
+            QMenu {
+                background-color: #ffffff;
+                color: #1e1e1e;
+                border: 1px solid #c0c0c0;
+            }
+            QMenu::item:selected {
+                background-color: #0078d4;
+                color: #ffffff;
+            }
+            QToolBar {
+                background-color: #f0f0f0;
+                border: none;
+                spacing: 5px;
+            }
+            QToolButton {
+                background-color: transparent;
+                color: #1e1e1e;
+                border: none;
+                padding: 5px;
+            }
+            QToolButton:hover {
+                background-color: #0078d4;
+                color: #ffffff;
+            }
+            QStatusBar {
+                background-color: #0078d4;
+                color: white;
+            }
+            QSplitter::handle {
+                background-color: #c0c0c0;
+            }
+            QScrollBar:vertical {
+                background-color: #f0f0f0;
+                width: 14px;
+            }
+            QScrollBar::handle:vertical {
+                background-color: #c0c0c0;
+                min-height: 20px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background-color: #a0a0a0;
+            }
+            QScrollBar:horizontal {
+                background-color: #f0f0f0;
+                height: 14px;
+            }
+            QScrollBar::handle:horizontal {
+                background-color: #c0c0c0;
+                min-width: 20px;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background-color: #a0a0a0;
+            }
+            QScrollBar::add-line, QScrollBar::sub-line {
+                background: none;
+                border: none;
+            }
+        """)
+    
+    def _toggle_theme(self):
+        """Toggle between light and dark themes."""
+        self.dark_mode = not self.dark_mode
+        if self.dark_mode:
+            self._apply_dark_theme()
+            self.toggle_theme_action.setText("Switch to &Light Mode")
+        else:
+            self._apply_light_theme()
+            self.toggle_theme_action.setText("Switch to &Dark Mode")
+        self.editor.set_dark_mode(self.dark_mode)
     
     def _update_cursor_position(self):
         """Update cursor position in status bar."""
