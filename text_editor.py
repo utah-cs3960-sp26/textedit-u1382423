@@ -764,6 +764,13 @@ class SyntaxHighlighter(QSyntaxHighlighter):
         
         lang_def = LANGUAGE_DEFINITIONS[language]
         
+        # Add preprocessor directive handling for C, C++
+        if language in ('c', 'cpp'):
+            # Highlight preprocessor directives (#include, #define, etc.) as keywords (including the # symbol)
+            self.highlighting_rules.append((re.compile(r'#\s*(?:include|define|ifdef|ifndef|if|else|elif|endif|pragma|error|warning|undef)\b'), 'keyword'))
+            # Highlight angle bracket includes <...> and quoted includes "..."
+            self.highlighting_rules.append((re.compile(r'<[^>]+>'), 'string'))
+        
         if lang_def.get('keywords'):
             pattern = r'\b(' + '|'.join(re.escape(kw) for kw in lang_def['keywords']) + r')\b'
             self.highlighting_rules.append((re.compile(pattern, re.IGNORECASE if language == 'sql' else 0), 'keyword'))
