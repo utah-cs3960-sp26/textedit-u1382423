@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QPlainTextEdit, QWidget, QVBoxLayout,
     QHBoxLayout, QTreeView, QSplitter, QFileDialog, QMessageBox,
     QAction, QMenuBar, QToolBar, QStatusBar, QFileSystemModel,
-    QInputDialog, QShortcut, QTextEdit
+    QInputDialog, QShortcut, QTextEdit, QLabel
 )
 from PyQt5.QtCore import Qt, QDir, QModelIndex, QRect
 from PyQt5.QtGui import (
@@ -18,6 +18,50 @@ from PyQt5.QtGui import (
     QTextCursor, QTextCharFormat, QBrush, QPen, QSyntaxHighlighter
 )
 import re
+
+
+class StripedOverlay(QWidget):
+    """Widget displaying diagonal stripes with centered error text."""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet("background-color: transparent;")
+    
+    def paintEvent(self, event):
+        """Paint diagonal stripes and error text."""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        # Draw diagonal stripes
+        stripe_width = 20
+        stripe_spacing = 10
+        angle = 45
+        
+        # Draw stripes across the entire widget
+        width = self.width()
+        height = self.height()
+        
+        # Create a light grey color for stripes
+        stripe_color = QColor("#5a5a5a")
+        painter.setPen(QPen(stripe_color, 2))
+        
+        # Draw diagonal lines from top-left to bottom-right
+        for i in range(-height, width, stripe_width + stripe_spacing):
+            x1 = i
+            y1 = 0
+            x2 = i + height
+            y2 = height
+            painter.drawLine(int(x1), int(y1), int(x2), int(y2))
+        
+        # Draw centered error text
+        painter.setPen(QColor("#ff6b6b"))
+        font = QFont()
+        font.setPointSize(18)
+        font.setBold(True)
+        painter.setFont(font)
+        
+        rect = self.rect()
+        painter.drawText(rect, Qt.AlignCenter, "Incompatible File Type")
 
 
 LANGUAGE_DEFINITIONS = {
@@ -626,6 +670,7 @@ class CodeEditor(QPlainTextEdit):
         self.current_file = None
         self.current_language = None
         self.highlighter = None
+        self.is_invalid_file = False
         
         self._setup_editor()
         self._setup_line_numbers()
@@ -1032,10 +1077,10 @@ class TextEditor(QMainWindow):
     
     def _setup_ui(self):
         """Set up the main UI components."""
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        layout = QHBoxLayout(central_widget)
-        layout.setContentsMargins(0, 0, 0, 0)
+        self.central_widget = QWidget()
+        self.setCentralWidget(self.central_widget)
+        self.central_layout = QHBoxLayout(self.central_widget)
+        self.central_layout.setContentsMargins(0, 0, 0, 0)
         
         splitter = QSplitter(Qt.Horizontal)
         
@@ -1050,7 +1095,8 @@ class TextEditor(QMainWindow):
         splitter.addWidget(self.editor)
         splitter.setSizes([250, 950])
         
-        layout.addWidget(splitter)
+        self.central_layout.addWidget(splitter)
+        self.splitter = splitter
     
     def _setup_menu(self):
         """Set up the menu bar."""
@@ -1075,15 +1121,15 @@ class TextEditor(QMainWindow):
         
         file_menu.addSeparator()
         
-        save_action = QAction("&Save", self)
-        save_action.setShortcut(QKeySequence.Save)
-        save_action.triggered.connect(self._save_file)
-        file_menu.addAction(save_action)
+        self.save_action = QAction("&Save", self)
+        self.save_action.setShortcut(QKeySequence.Save)
+        self.save_action.triggered.connect(self._save_file)
+        file_menu.addAction(self.save_action)
         
-        save_as_action = QAction("Save &As...", self)
-        save_as_action.setShortcut(QKeySequence.SaveAs)
-        save_as_action.triggered.connect(self._save_file_as)
-        file_menu.addAction(save_as_action)
+        self.save_as_action = QAction("Save &As...", self)
+        self.save_as_action.setShortcut(QKeySequence.SaveAs)
+        self.save_as_action.triggered.connect(self._save_file_as)
+        file_menu.addAction(self.save_as_action)
         
         file_menu.addSeparator()
         
@@ -1148,8 +1194,8 @@ class TextEditor(QMainWindow):
         
         toolbar.addAction("New", self._new_file)
         toolbar.addAction("Open", self._open_file)
-        toolbar.addAction("Save", self._save_file)
-        toolbar.addAction("Save As", self._save_file_as)
+        self.save_toolbar_action = toolbar.addAction("Save", self._save_file)
+        self.save_as_toolbar_action = toolbar.addAction("Save As", self._save_file_as)
         toolbar.addSeparator()
         toolbar.addAction("Undo", self.editor.undo)
         toolbar.addAction("Redo", self.editor.redo)
@@ -1282,6 +1328,7 @@ class TextEditor(QMainWindow):
             self.editor.blockSignals(False)
             self.editor.current_file = None
             self.editor.is_modified = False
+            self.editor.is_invalid_file = False
             self.setWindowTitle("Text Editor - New File")
             self._update_language_status()
             self.editor.update_line_number_area_width(0)
@@ -1296,24 +1343,104 @@ class TextEditor(QMainWindow):
             if file_path:
                 self._open_file_path(file_path, check_save=False)
     
+    def _is_likely_binary(self, file_path):
+        """Check if file is likely binary by reading first bytes."""
+        try:
+            with open(file_path, 'rb') as f:
+                initial_bytes = f.read(512)
+            
+            # Common binary file signatures
+            binary_signatures = [
+                b'\x7fELF',        # ELF executable
+                b'MZ\x90\x00',     # Windows executable
+                b'\x89PNG\r\n',    # PNG image
+                b'\xff\xd8\xff',   # JPEG image
+                b'GIF8',           # GIF image
+                b'%PDF',           # PDF
+                b'PK\x03\x04',     # ZIP archive
+                b'\x1f\x8b\x08',   # GZIP compressed
+                b'BM',             # BMP image
+                b'II\x2a\x00',     # TIFF image (little-endian)
+                b'MM\x00\x2a',     # TIFF image (big-endian)
+                b'Rar!',           # RAR archive
+                b'7z\xbc\xaf',     # 7-zip archive
+                b'\xca\xfe\xba\xbe',  # Java class file
+                b'\xfe\xed\xfa',   # Mach-O binary
+                b'Kadu\x00',       # KDE Krita file
+                b'\x00\x00\x01\x00',  # Windows icon
+            ]
+            
+            for sig in binary_signatures:
+                if initial_bytes.startswith(sig):
+                    return True
+            
+            # Check for null bytes (common in binary files)
+            if b'\x00' in initial_bytes:
+                return True
+                
+            return False
+        except Exception:
+            # If we can't determine, assume it's not binary
+            return False
+    
     def _open_file_path(self, file_path, check_save=True):
         """Open a specific file."""
         if check_save and not self._check_save():
             return
+        
+        # Check for binary files before attempting to read
+        if self._is_likely_binary(file_path):
+            self._handle_invalid_file(file_path)
+            return
+        
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
+        except (UnicodeDecodeError, UnicodeError):
+            # Binary or incompatible file type - show error overlay instead of popup
+            self._handle_invalid_file(file_path)
+            return
+        except (FileNotFoundError, IsADirectoryError, PermissionError) as e:
+            # Actual file access errors - show error dialog
+            QMessageBox.critical(self, "Error", f"Could not open file:\n{str(e)}")
+            return
+        except Exception as e:
+            # Any other exception during read - treat as invalid file for safety
+            self._handle_invalid_file(file_path)
+            return
+        
+        # File was successfully read as text
+        try:
             self.editor.blockSignals(True)
             self.editor.setPlainText(content)
             self.editor.set_language_from_file(file_path)
             self.editor.blockSignals(False)
             self.editor.current_file = file_path
             self.editor.is_modified = False
+            self.editor.is_invalid_file = False
             self.setWindowTitle(f"Text Editor - {os.path.basename(file_path)}")
             self._update_language_status()
             self.editor.update_line_number_area_width(0)
             self.file_tree.select_file(file_path)
+            self._show_error_overlay(False)
         except Exception as e:
+            # Any error during editor setup - show error dialog
+            QMessageBox.critical(self, "Error", f"Could not open file:\n{str(e)}")
+    
+    def _handle_invalid_file(self, file_path):
+        """Handle opening of incompatible file type."""
+        try:
+            self.editor.blockSignals(True)
+            self.editor.clear()
+            self.editor.blockSignals(False)
+            self.editor.current_file = file_path
+            self.editor.is_modified = False
+            self.editor.is_invalid_file = True
+            self.setWindowTitle(f"Text Editor - {os.path.basename(file_path)}")
+            self._update_language_status()
+            self._show_error_overlay(True)
+        except Exception as e:
+            # Fallback error handling if invalid file display fails
             QMessageBox.critical(self, "Error", f"Could not open file:\n{str(e)}")
     
     def _open_folder(self):
@@ -1324,6 +1451,8 @@ class TextEditor(QMainWindow):
     
     def _save_file(self):
         """Save the current file."""
+        if self.editor.is_invalid_file:
+            return
         if self.editor.current_file:
             self._save_to_path(self.editor.current_file)
         else:
@@ -1331,6 +1460,8 @@ class TextEditor(QMainWindow):
     
     def _save_file_as(self):
         """Save file with a new name."""
+        if self.editor.is_invalid_file:
+            return
         dialog = QFileDialog(self, "Save File")
         dialog.setAcceptMode(QFileDialog.AcceptSave)
         dialog.setNameFilters(["All Files (*)", "Text Files (*.txt)", "Python Files (*.py)"])
@@ -1405,6 +1536,36 @@ class TextEditor(QMainWindow):
                     self.editor.setTextCursor(found)
                 else:
                     QMessageBox.information(self, "Find", "Text not found")
+    
+    def _show_error_overlay(self, show_error):
+        """Show or hide error overlay for incompatible files."""
+        if show_error:
+            if not hasattr(self, 'striped_overlay'):
+                self.striped_overlay = StripedOverlay()
+            
+            # Hide editor and show striped overlay
+            self.editor.hide()
+            # Check if overlay is already in splitter
+            if self.splitter.indexOf(self.striped_overlay) < 0:
+                self.splitter.addWidget(self.striped_overlay)
+            self.striped_overlay.show()
+            
+            # Disable and grey out save actions
+            self.save_action.setEnabled(False)
+            self.save_as_action.setEnabled(False)
+            self.save_toolbar_action.setEnabled(False)
+            self.save_as_toolbar_action.setEnabled(False)
+        else:
+            # Show editor and hide striped overlay
+            if hasattr(self, 'striped_overlay') and self.splitter.indexOf(self.striped_overlay) >= 0:
+                self.striped_overlay.hide()
+            self.editor.show()
+            
+            # Enable save actions
+            self.save_action.setEnabled(True)
+            self.save_as_action.setEnabled(True)
+            self.save_toolbar_action.setEnabled(True)
+            self.save_as_toolbar_action.setEnabled(True)
     
     def closeEvent(self, event):
         """Handle window close event."""

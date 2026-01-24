@@ -875,6 +875,141 @@ class TestLanguageSpecificIndentation:
         assert lines[1].startswith("    ")
 
 
+class TestBinaryFileDetection:
+    """Tests for binary file detection."""
+
+    def test_is_likely_binary_ova(self, main_window, tmp_path):
+        """Test detection of OVA files."""
+        ova_file = tmp_path / "test.ova"
+        ova_file.write_bytes(b'\x1f\x8b\x08\x00' + b'gzip content' * 100)
+        assert main_window._is_likely_binary(str(ova_file)) is True
+
+    def test_is_likely_binary_pdf(self, main_window, tmp_path):
+        """Test detection of PDF files."""
+        pdf_file = tmp_path / "test.pdf"
+        pdf_file.write_bytes(b'%PDF-1.4\n' + b'pdf content' * 100)
+        assert main_window._is_likely_binary(str(pdf_file)) is True
+
+    def test_is_likely_binary_zip(self, main_window, tmp_path):
+        """Test detection of ZIP files."""
+        zip_file = tmp_path / "test.zip"
+        zip_file.write_bytes(b'PK\x03\x04' + b'zip content' * 100)
+        assert main_window._is_likely_binary(str(zip_file)) is True
+
+    def test_is_likely_binary_exe(self, main_window, tmp_path):
+        """Test detection of Windows executables."""
+        exe_file = tmp_path / "test.exe"
+        exe_file.write_bytes(b'MZ\x90\x00' + b'exe content' * 100)
+        assert main_window._is_likely_binary(str(exe_file)) is True
+
+    def test_is_likely_binary_png(self, main_window, tmp_path):
+        """Test detection of PNG images."""
+        png_file = tmp_path / "test.png"
+        png_file.write_bytes(b'\x89PNG\r\n\x1a\n' + b'png content' * 100)
+        assert main_window._is_likely_binary(str(png_file)) is True
+
+    def test_is_likely_binary_text(self, main_window, tmp_path):
+        """Test that text files are not detected as binary."""
+        text_file = tmp_path / "test.txt"
+        text_file.write_text("This is a text file")
+        assert main_window._is_likely_binary(str(text_file)) is False
+
+    def test_is_likely_binary_python(self, main_window, tmp_path):
+        """Test that Python files are not detected as binary."""
+        py_file = tmp_path / "test.py"
+        py_file.write_text("print('hello')")
+        assert main_window._is_likely_binary(str(py_file)) is False
+
+
+class TestIncompatibleFileHandling:
+    """Tests for incompatible file type handling."""
+
+    def test_open_incompatible_file_sets_flag(self, main_window, tmp_path, qtbot):
+        """Test opening incompatible file sets is_invalid_file flag."""
+        # Create a binary file
+        binary_file = tmp_path / "test.bin"
+        binary_file.write_bytes(b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR')
+        
+        main_window._open_file_path(str(binary_file), check_save=False)
+        assert main_window.editor.is_invalid_file is True
+
+    def test_open_incompatible_file_shows_overlay(self, main_window, tmp_path, qtbot):
+        """Test opening incompatible file shows striped overlay."""
+        binary_file = tmp_path / "test.bin"
+        binary_file.write_bytes(b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR')
+        
+        main_window._open_file_path(str(binary_file), check_save=False)
+        qtbot.wait(100)  # Wait for UI updates
+        assert hasattr(main_window, 'striped_overlay')
+        assert main_window.striped_overlay.isVisible()
+
+    def test_open_valid_file_hides_overlay(self, main_window, tmp_path, qtbot):
+        """Test opening valid file hides striped overlay."""
+        # First open an invalid file
+        binary_file = tmp_path / "test.bin"
+        binary_file.write_bytes(b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR')
+        main_window._open_file_path(str(binary_file), check_save=False)
+        qtbot.wait(100)
+        
+        # Then open a valid file
+        text_file = tmp_path / "test.txt"
+        text_file.write_text("Hello, World!")
+        main_window._open_file_path(str(text_file), check_save=False)
+        qtbot.wait(100)
+        
+        assert main_window.editor.is_invalid_file is False
+        assert not main_window.striped_overlay.isVisible()
+
+    def test_save_file_blocked_for_invalid_type(self, main_window, tmp_path, qtbot):
+        """Test save is blocked for invalid file types."""
+        binary_file = tmp_path / "test.bin"
+        binary_file.write_bytes(b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR')
+        
+        main_window._open_file_path(str(binary_file), check_save=False)
+        qtbot.wait(100)
+        
+        # Save should just return without doing anything
+        main_window._save_file()
+        # If we get here without error, the test passes
+        assert main_window.save_action.isEnabled() is False
+
+    def test_save_as_blocked_for_invalid_type(self, main_window, tmp_path, qtbot):
+        """Test save as is blocked for invalid file types."""
+        binary_file = tmp_path / "test.bin"
+        binary_file.write_bytes(b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR')
+        
+        main_window._open_file_path(str(binary_file), check_save=False)
+        qtbot.wait(100)
+        
+        # Save As should just return without doing anything
+        main_window._save_file_as()
+        # If we get here without error, the test passes
+        assert main_window.save_as_action.isEnabled() is False
+
+    def test_new_file_resets_invalid_flag(self, main_window, tmp_path, qtbot):
+        """Test creating new file resets is_invalid_file flag."""
+        binary_file = tmp_path / "test.bin"
+        binary_file.write_bytes(b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR')
+        
+        main_window._open_file_path(str(binary_file), check_save=False)
+        assert main_window.editor.is_invalid_file is True
+        
+        main_window._new_file()
+        assert main_window.editor.is_invalid_file is False
+
+    def test_open_valid_file_resets_invalid_flag(self, main_window, tmp_path, qtbot):
+        """Test opening valid file after invalid file resets flag."""
+        binary_file = tmp_path / "test.bin"
+        binary_file.write_bytes(b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR')
+        main_window._open_file_path(str(binary_file), check_save=False)
+        assert main_window.editor.is_invalid_file is True
+        
+        text_file = tmp_path / "test.txt"
+        text_file.write_text("Hello, World!")
+        main_window._open_file_path(str(text_file), check_save=False)
+        assert main_window.editor.is_invalid_file is False
+
+
 class TestEditorLanguageIntegration:
     """Tests for editor language integration."""
 
