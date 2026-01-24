@@ -10,14 +10,223 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QPlainTextEdit, QWidget, QVBoxLayout,
     QHBoxLayout, QTreeView, QSplitter, QFileDialog, QMessageBox,
     QAction, QMenuBar, QToolBar, QStatusBar, QFileSystemModel,
-    QInputDialog, QShortcut, QTextEdit, QLabel
+    QInputDialog, QShortcut, QTextEdit, QLabel, QDialog, QPushButton,
+    QLineEdit, QCheckBox
 )
 from PyQt5.QtCore import Qt, QDir, QModelIndex, QRect
 from PyQt5.QtGui import (
     QFont, QColor, QPainter, QTextFormat, QKeySequence,
     QTextCursor, QTextCharFormat, QBrush, QPen, QSyntaxHighlighter
 )
+from PyQt5.QtGui import QTextDocument
 import re
+
+
+class FindReplaceDialog(QDialog):
+    """Dialog for finding and replacing text with traverse and case sensitivity options."""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent_window = parent
+        self.editor = parent.editor if parent else None
+        self.current_search_index = -1
+        self.search_results = []
+        self.setup_ui()
+        self.setWindowTitle("Find and Replace")
+        self.setGeometry(200, 200, 500, 250)
+    
+    def setup_ui(self):
+        """Setup the dialog UI."""
+        layout = QVBoxLayout()
+        
+        # Find section
+        find_layout = QHBoxLayout()
+        find_layout.addWidget(QLabel("Find:"))
+        self.find_input = QLineEdit()
+        find_layout.addWidget(self.find_input)
+        layout.addLayout(find_layout)
+        
+        # Replace section
+        replace_layout = QHBoxLayout()
+        replace_layout.addWidget(QLabel("Replace:"))
+        self.replace_input = QLineEdit()
+        replace_layout.addWidget(self.replace_input)
+        layout.addLayout(replace_layout)
+        
+        # Options section
+        options_layout = QHBoxLayout()
+        self.case_sensitive_checkbox = QCheckBox("Case Sensitive")
+        options_layout.addWidget(self.case_sensitive_checkbox)
+        options_layout.addStretch()
+        layout.addLayout(options_layout)
+        
+        # Buttons section
+        buttons_layout = QHBoxLayout()
+        
+        self.find_next_btn = QPushButton("Find Next")
+        self.find_next_btn.clicked.connect(self.find_next)
+        buttons_layout.addWidget(self.find_next_btn)
+        
+        self.find_prev_btn = QPushButton("Find Previous")
+        self.find_prev_btn.clicked.connect(self.find_previous)
+        buttons_layout.addWidget(self.find_prev_btn)
+        
+        self.replace_btn = QPushButton("Replace")
+        self.replace_btn.clicked.connect(self.replace_current)
+        buttons_layout.addWidget(self.replace_btn)
+        
+        self.replace_all_btn = QPushButton("Replace All")
+        self.replace_all_btn.clicked.connect(self.replace_all)
+        buttons_layout.addWidget(self.replace_all_btn)
+        
+        self.close_btn = QPushButton("Close")
+        self.close_btn.clicked.connect(self.close)
+        buttons_layout.addWidget(self.close_btn)
+        
+        layout.addLayout(buttons_layout)
+        
+        # Status label
+        self.status_label = QLabel("")
+        layout.addWidget(self.status_label)
+        
+        self.setLayout(layout)
+    
+    def find_next(self):
+        """Find next instance of search text."""
+        if not self.editor:
+            return
+        
+        search_text = self.find_input.text()
+        if not search_text:
+            self.status_label.setText("Please enter search text")
+            return
+        
+        cursor = self.editor.textCursor()
+        document = self.editor.document()
+        
+        # Create search flags based on case sensitivity
+        if self.case_sensitive_checkbox.isChecked():
+            flags = QTextDocument.FindCaseSensitively
+        else:
+            flags = QTextDocument.FindFlags()
+        
+        # Create a new cursor for finding
+        find_cursor = QTextCursor(cursor)
+        
+        # Find from current position
+        found = document.find(search_text, find_cursor, flags)
+        
+        if found.isNull():
+            # Wrap around to beginning
+            find_cursor = QTextCursor(document)
+            find_cursor.movePosition(QTextCursor.Start)
+            found = document.find(search_text, find_cursor, flags)
+        
+        if not found.isNull():
+            self.editor.setTextCursor(found)
+            self.status_label.setText("Text found")
+        else:
+            self.status_label.setText("Text not found")
+    
+    def find_previous(self):
+        """Find previous instance of search text."""
+        if not self.editor:
+            return
+        
+        search_text = self.find_input.text()
+        if not search_text:
+            self.status_label.setText("Please enter search text")
+            return
+        
+        cursor = self.editor.textCursor()
+        document = self.editor.document()
+        
+        # Create search flags
+        flags = QTextDocument.FindBackward
+        if self.case_sensitive_checkbox.isChecked():
+            flags |= QTextDocument.FindCaseSensitively
+        
+        # Create a new cursor for finding
+        find_cursor = QTextCursor(cursor)
+        
+        # Move to start of current selection if text is selected
+        if find_cursor.hasSelection():
+            find_cursor.setPosition(find_cursor.selectionStart())
+        
+        # Find backwards from current position
+        found = document.find(search_text, find_cursor, flags)
+        
+        if found.isNull():
+            # Wrap around to end
+            find_cursor = QTextCursor(document)
+            find_cursor.movePosition(QTextCursor.End)
+            found = document.find(search_text, find_cursor, flags)
+        
+        if not found.isNull():
+            self.editor.setTextCursor(found)
+            self.status_label.setText("Text found")
+        else:
+            self.status_label.setText("Text not found")
+    
+    def replace_current(self):
+        """Replace current selection with replacement text."""
+        if not self.editor:
+            return
+        
+        cursor = self.editor.textCursor()
+        if cursor.hasSelection():
+            replacement_text = self.replace_input.text()
+            cursor.insertText(replacement_text)
+            self.editor.setTextCursor(cursor)
+            self.status_label.setText("Text replaced")
+            # Find next after replacement
+            self.find_next()
+        else:
+            self.status_label.setText("No text selected to replace")
+    
+    def replace_all(self):
+        """Replace all instances of search text."""
+        if not self.editor:
+            return
+        
+        search_text = self.find_input.text()
+        replacement_text = self.replace_input.text()
+        
+        if not search_text:
+            self.status_label.setText("Please enter search text")
+            return
+        
+        document = self.editor.document()
+        
+        # Create search flags
+        if self.case_sensitive_checkbox.isChecked():
+            flags = QTextDocument.FindCaseSensitively
+        else:
+            flags = QTextDocument.FindFlags()
+        
+        replacement_count = 0
+        current_pos = 0
+        
+        # Keep replacing until no more matches found
+        while True:
+            # Create cursor at current position
+            find_cursor = QTextCursor(document)
+            find_cursor.setPosition(current_pos)
+            
+            # Find next occurrence
+            found = document.find(search_text, find_cursor, flags)
+            if found.isNull():
+                break
+            
+            # Replace the found text
+            found.removeSelectedText()
+            found.insertText(replacement_text)
+            
+            # Move position past the replacement for next search
+            current_pos = found.position()
+            replacement_count += 1
+        
+        self.status_label.setText(f"Replaced {replacement_count} instance(s)")
 
 
 class StripedOverlay(QWidget):
@@ -1522,20 +1731,9 @@ class TextEditor(QMainWindow):
         self.file_tree.setVisible(not self.file_tree.isVisible())
     
     def _show_find_dialog(self):
-        """Show find dialog."""
-        text, ok = QInputDialog.getText(self, "Find", "Search for:")
-        if ok and text:
-            cursor = self.editor.textCursor()
-            document = self.editor.document()
-            found = document.find(text, cursor)
-            if not found.isNull():
-                self.editor.setTextCursor(found)
-            else:
-                found = document.find(text)
-                if not found.isNull():
-                    self.editor.setTextCursor(found)
-                else:
-                    QMessageBox.information(self, "Find", "Text not found")
+        """Show find and replace dialog."""
+        dialog = FindReplaceDialog(self)
+        dialog.exec_()
     
     def _show_error_overlay(self, show_error):
         """Show or hide error overlay for incompatible files."""

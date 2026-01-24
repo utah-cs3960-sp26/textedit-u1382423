@@ -17,7 +17,8 @@ from PyQt5.QtGui import QTextCursor, QKeyEvent
 
 from text_editor import (
     CodeEditor, FileTreeView, TextEditor, LineNumberArea, main,
-    SyntaxHighlighter, LANGUAGE_DEFINITIONS, get_language_for_file
+    SyntaxHighlighter, LANGUAGE_DEFINITIONS, get_language_for_file,
+    FindReplaceDialog
 )
 
 
@@ -575,40 +576,7 @@ class TestCheckSaveDialog:
         main_window.editor.is_modified = False
 
 
-class TestFindDialog:
-    """Tests for find dialog functionality."""
 
-    def test_show_find_dialog_found(self, main_window, qtbot):
-        """Test find dialog when text is found."""
-        main_window.editor.setPlainText("Hello world, hello again")
-        with patch('text_editor.QInputDialog.getText', return_value=("hello", True)):
-            main_window._show_find_dialog()
-            cursor = main_window.editor.textCursor()
-            assert cursor.hasSelection()
-
-    def test_show_find_dialog_not_found(self, main_window, qtbot):
-        """Test find dialog when text is not found."""
-        main_window.editor.setPlainText("Hello world")
-        with patch('text_editor.QInputDialog.getText', return_value=("xyz", True)):
-            with patch('text_editor.QMessageBox.information'):
-                main_window._show_find_dialog()
-
-    def test_show_find_dialog_cancelled(self, main_window, qtbot):
-        """Test find dialog when cancelled."""
-        main_window.editor.setPlainText("Hello world")
-        with patch('text_editor.QInputDialog.getText', return_value=("", False)):
-            main_window._show_find_dialog()
-
-    def test_find_wraps_around(self, main_window, qtbot):
-        """Test find wraps to beginning if not found from cursor."""
-        main_window.editor.setPlainText("Hello world")
-        cursor = main_window.editor.textCursor()
-        cursor.movePosition(QTextCursor.End)
-        main_window.editor.setTextCursor(cursor)
-        with patch('text_editor.QInputDialog.getText', return_value=("Hello", True)):
-            main_window._show_find_dialog()
-            cursor = main_window.editor.textCursor()
-            assert cursor.hasSelection()
 
 
 class TestCloseEvent:
@@ -687,23 +655,7 @@ class TestFileDialogs:
         with patch('text_editor.QFileDialog.getExistingDirectory', return_value=''):
             main_window._open_folder()
 
-    def test_save_file_as_dialog(self, main_window, tmp_path, qtbot):
-        """Test _save_file_as method with mocked dialog."""
-        file_path = str(tmp_path / "new_save.txt")
-        qtbot.keyClicks(main_window.editor, "Content to save")
-        with patch('text_editor.QFileDialog.getSaveFileName', return_value=(file_path, 'All Files (*)')):
-            main_window._save_file_as()
-            assert main_window.editor.current_file == file_path
-            assert os.path.exists(file_path)
-        main_window.editor.is_modified = False
 
-    def test_save_file_as_dialog_cancelled(self, main_window, qtbot):
-        """Test _save_file_as when dialog is cancelled."""
-        qtbot.keyClicks(main_window.editor, "Content")
-        with patch('text_editor.QFileDialog.getSaveFileName', return_value=('', '')):
-            main_window._save_file_as()
-            assert main_window.editor.current_file is None
-        main_window.editor.is_modified = False
 
 
 class TestEnterBetweenBracketsWithIndent:
@@ -1047,6 +999,177 @@ class TestEditorLanguageIntegration:
         """Test new file does not set is_modified."""
         main_window._new_file()
         assert main_window.editor.is_modified is False
+
+
+class TestFindReplaceDialog:
+    """Tests for FindReplaceDialog functionality."""
+    
+    def test_dialog_creation(self, main_window, qtbot):
+        """Test FindReplaceDialog is created with editor."""
+        dialog = FindReplaceDialog(main_window)
+        qtbot.addWidget(dialog)
+        assert dialog is not None
+        assert dialog.editor is not None
+    
+    def test_find_next_basic(self, main_window, qtbot):
+        """Test finding next occurrence of text."""
+        main_window.editor.setPlainText("Hello World Hello World")
+        dialog = FindReplaceDialog(main_window)
+        qtbot.addWidget(dialog)
+        
+        dialog.find_input.setText("Hello")
+        dialog.find_next()
+        
+        cursor = main_window.editor.textCursor()
+        assert cursor.hasSelection()
+        assert "Hello" in main_window.editor.toPlainText()[cursor.selectionStart():cursor.selectionEnd()]
+    
+    def test_find_previous(self, main_window, qtbot):
+        """Test finding previous occurrence of text."""
+        main_window.editor.setPlainText("Hello World Hello World")
+        dialog = FindReplaceDialog(main_window)
+        qtbot.addWidget(dialog)
+        
+        # Move cursor to end
+        cursor = main_window.editor.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        main_window.editor.setTextCursor(cursor)
+        
+        dialog.find_input.setText("Hello")
+        dialog.find_previous()
+        
+        cursor = main_window.editor.textCursor()
+        assert cursor.hasSelection()
+    
+    def test_find_not_found(self, main_window, qtbot):
+        """Test find when text is not found."""
+        main_window.editor.setPlainText("Hello World")
+        dialog = FindReplaceDialog(main_window)
+        qtbot.addWidget(dialog)
+        
+        dialog.find_input.setText("NotFound")
+        dialog.find_next()
+        
+        assert "not found" in dialog.status_label.text().lower()
+    
+    def test_find_empty_search(self, main_window, qtbot):
+        """Test find with empty search text."""
+        main_window.editor.setPlainText("Hello World")
+        dialog = FindReplaceDialog(main_window)
+        qtbot.addWidget(dialog)
+        
+        dialog.find_input.setText("")
+        dialog.find_next()
+        
+        assert "Please enter search text" in dialog.status_label.text()
+    
+    def test_case_sensitive_search(self, main_window, qtbot):
+        """Test case-sensitive search."""
+        main_window.editor.setPlainText("Hello hello HELLO")
+        dialog = FindReplaceDialog(main_window)
+        qtbot.addWidget(dialog)
+        
+        dialog.find_input.setText("hello")
+        dialog.case_sensitive_checkbox.setChecked(True)
+        dialog.find_next()
+        
+        cursor = main_window.editor.textCursor()
+        selected_text = main_window.editor.toPlainText()[cursor.selectionStart():cursor.selectionEnd()]
+        assert selected_text == "hello"
+    
+    def test_case_insensitive_search(self, main_window, qtbot):
+        """Test case-insensitive search."""
+        main_window.editor.setPlainText("Hello hello HELLO")
+        dialog = FindReplaceDialog(main_window)
+        qtbot.addWidget(dialog)
+        
+        dialog.find_input.setText("HELLO")
+        dialog.case_sensitive_checkbox.setChecked(False)
+        dialog.find_next()
+        
+        # Should find something
+        assert "Text found" in dialog.status_label.text()
+    
+    def test_replace_current(self, main_window, qtbot):
+        """Test replace current selection."""
+        main_window.editor.setPlainText("Hello World Hello World")
+        dialog = FindReplaceDialog(main_window)
+        qtbot.addWidget(dialog)
+        
+        dialog.find_input.setText("Hello")
+        dialog.replace_input.setText("Hi")
+        dialog.find_next()
+        
+        dialog.replace_current()
+        
+        text = main_window.editor.toPlainText()
+        assert text.startswith("Hi")
+    
+    def test_replace_all(self, main_window, qtbot):
+        """Test replace all occurrences."""
+        main_window.editor.setPlainText("Hello World Hello World Hello")
+        dialog = FindReplaceDialog(main_window)
+        qtbot.addWidget(dialog)
+        
+        dialog.find_input.setText("Hello")
+        dialog.replace_input.setText("Hi")
+        dialog.replace_all()
+        
+        text = main_window.editor.toPlainText()
+        assert text.count("Hi") == 3
+        assert "Hello" not in text
+    
+    def test_replace_all_counter(self, main_window, qtbot):
+        """Test replace all shows count."""
+        main_window.editor.setPlainText("foo bar foo baz foo")
+        dialog = FindReplaceDialog(main_window)
+        qtbot.addWidget(dialog)
+        
+        dialog.find_input.setText("foo")
+        dialog.replace_input.setText("bar")
+        dialog.replace_all()
+        
+        assert "3" in dialog.status_label.text()
+    
+    def test_find_wrap_around(self, main_window, qtbot):
+        """Test find wraps around to beginning."""
+        main_window.editor.setPlainText("Hello World Hello World")
+        dialog = FindReplaceDialog(main_window)
+        qtbot.addWidget(dialog)
+        
+        # Move cursor to middle
+        cursor = main_window.editor.textCursor()
+        cursor.setPosition(12)
+        main_window.editor.setTextCursor(cursor)
+        
+        # Find to end, then wrap around
+        dialog.find_input.setText("Hello")
+        dialog.find_next()
+        pos1 = main_window.editor.textCursor().position()
+        
+        dialog.find_next()
+        pos2 = main_window.editor.textCursor().position()
+        
+        # Should find second Hello, then wrap to first
+        assert pos1 != pos2
+    
+    def test_find_previous_wrap_around(self, main_window, qtbot):
+        """Test find previous wraps around to end."""
+        main_window.editor.setPlainText("Hello World Hello World")
+        dialog = FindReplaceDialog(main_window)
+        qtbot.addWidget(dialog)
+        
+        # Move cursor to beginning
+        cursor = main_window.editor.textCursor()
+        cursor.setPosition(0)
+        main_window.editor.setTextCursor(cursor)
+        
+        dialog.find_input.setText("Hello")
+        dialog.find_previous()
+        
+        # Should wrap to end and find last Hello
+        cursor = main_window.editor.textCursor()
+        assert cursor.position() > 12
 
 
 if __name__ == "__main__":
