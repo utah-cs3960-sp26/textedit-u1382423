@@ -19,7 +19,8 @@ from PyQt5.QtGui import QTextCursor, QKeyEvent
 from text_editor import (
     CodeEditor, FileTreeView, TextEditor, LineNumberArea, main,
     SyntaxHighlighter, LANGUAGE_DEFINITIONS, get_language_for_file,
-    FindReplaceDialog
+    FindReplaceDialog, Document, DocumentManager, EditorPane, EditorTabWidget,
+    SplitContainer
 )
 
 
@@ -47,6 +48,7 @@ def file_tree(qtbot):
 def main_window(qtbot):
     """Create a TextEditor main window instance."""
     window = TextEditor()
+    window._skip_save_check = True
     qtbot.addWidget(window)
     window.show()
     qtbot.waitExposed(window)
@@ -343,6 +345,8 @@ class TestFileTreeView:
 
     def test_is_not_directory(self, file_tree, temp_file):
         """Test file is not directory."""
+        dir_path = os.path.dirname(temp_file)
+        file_tree.set_root_path(dir_path)
         index = file_tree.model.index(temp_file)
         assert file_tree.is_directory(index) is False
 
@@ -385,7 +389,7 @@ class TestTextEditorMainWindow:
     def test_window_initialization(self, main_window):
         """Test main window initializes correctly."""
         assert main_window is not None
-        assert main_window.windowTitle() == "Text Editor"
+        assert "Text Editor" in main_window.windowTitle()
 
     def test_editor_exists(self, main_window):
         """Test editor widget exists."""
@@ -402,11 +406,12 @@ class TestTextEditorMainWindow:
         assert main_window.statusbar is not None
 
     def test_new_file(self, main_window, qtbot):
-        """Test new file action."""
-        qtbot.keyClicks(main_window.editor, "Some content")
-        main_window.editor.is_modified = False
+        """Test new file action creates a new tab."""
+        initial_tab_count = main_window.split_container._active_tab_widget.count()
         main_window._new_file()
+        new_tab_count = main_window.split_container._active_tab_widget.count()
         
+        assert new_tab_count == initial_tab_count + 1
         assert main_window.editor.toPlainText() == ""
         assert main_window.editor.current_file is None
 
@@ -421,7 +426,7 @@ class TestTextEditorMainWindow:
         """Test saving a file."""
         file_path = str(tmp_path / "saved_file.txt")
         qtbot.keyClicks(main_window.editor, "Test content")
-        main_window.editor.current_file = file_path
+        main_window.doc_manager.update_document_path(main_window.editor.doc, file_path)
         main_window._save_file()
         
         with open(file_path, 'r') as f:
@@ -438,8 +443,8 @@ class TestTextEditorMainWindow:
 
     def test_check_save_unmodified(self, main_window):
         """Test check save with unmodified document."""
-        main_window.editor.is_modified = False
-        assert main_window._check_save() is True
+        main_window.editor.doc.is_modified = False
+        assert main_window._check_save_all() is True
 
     def test_window_title_after_open(self, main_window, temp_file):
         """Test window title updates after opening file."""
@@ -584,29 +589,32 @@ class TestCheckSaveDialog:
 
     def test_check_save_discard(self, main_window, qtbot):
         """Test check save with discard option."""
-        main_window.editor.is_modified = True
+        main_window._skip_save_check = False
+        main_window.editor.doc.is_modified = True
         with patch('text_editor.QMessageBox.question', return_value=QMessageBox.Discard):
-            result = main_window._check_save()
+            result = main_window._check_save_all()
             assert result is True
-        main_window.editor.is_modified = False
+        main_window.editor.doc.is_modified = False
 
     def test_check_save_cancel(self, main_window, qtbot):
         """Test check save with cancel option."""
-        main_window.editor.is_modified = True
+        main_window._skip_save_check = False
+        main_window.editor.doc.is_modified = True
         with patch('text_editor.QMessageBox.question', return_value=QMessageBox.Cancel):
-            result = main_window._check_save()
+            result = main_window._check_save_all()
             assert result is False
-        main_window.editor.is_modified = False
+        main_window.editor.doc.is_modified = False
 
     def test_check_save_save_success(self, main_window, tmp_path, qtbot):
         """Test check save with save option."""
+        main_window._skip_save_check = False
         file_path = str(tmp_path / "save_test.txt")
-        main_window.editor.current_file = file_path
-        main_window.editor.is_modified = True
+        main_window.doc_manager.update_document_path(main_window.editor.doc, file_path)
+        main_window.editor.doc.is_modified = True
         with patch('text_editor.QMessageBox.question', return_value=QMessageBox.Save):
-            result = main_window._check_save()
+            result = main_window._check_save_all()
             assert result is True
-        main_window.editor.is_modified = False
+        main_window.editor.doc.is_modified = False
 
 
 
@@ -617,28 +625,31 @@ class TestCloseEvent:
 
     def test_close_event_unmodified(self, main_window):
         """Test close event with unmodified document."""
-        main_window.editor.is_modified = False
+        main_window._skip_save_check = False
+        main_window.editor.doc.is_modified = False
         event = MagicMock()
         main_window.closeEvent(event)
         event.accept.assert_called_once()
 
     def test_close_event_modified_cancel(self, main_window):
         """Test close event with modified document and cancel."""
-        main_window.editor.is_modified = True
+        main_window._skip_save_check = False
+        main_window.editor.doc.is_modified = True
         event = MagicMock()
         with patch('text_editor.QMessageBox.question', return_value=QMessageBox.Cancel):
             main_window.closeEvent(event)
             event.ignore.assert_called_once()
-        main_window.editor.is_modified = False
+        main_window.editor.doc.is_modified = False
 
     def test_close_event_modified_discard(self, main_window):
         """Test close event with modified document and discard."""
-        main_window.editor.is_modified = True
+        main_window._skip_save_check = False
+        main_window.editor.doc.is_modified = True
         event = MagicMock()
         with patch('text_editor.QMessageBox.question', return_value=QMessageBox.Discard):
             main_window.closeEvent(event)
             event.accept.assert_called_once()
-        main_window.editor.is_modified = False
+        main_window.editor.doc.is_modified = False
 
 
 class TestMainFunction:
@@ -909,89 +920,64 @@ class TestBinaryFileDetection:
 class TestIncompatibleFileHandling:
     """Tests for incompatible file type handling."""
 
-    def test_open_incompatible_file_sets_flag(self, main_window, tmp_path, qtbot):
-        """Test opening incompatible file sets is_invalid_file flag."""
-        # Create a binary file
+    def test_open_incompatible_file_shows_warning(self, main_window, tmp_path, qtbot):
+        """Test opening incompatible file shows warning message."""
         binary_file = tmp_path / "test.bin"
         binary_file.write_bytes(b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR')
         
-        main_window._open_file_path(str(binary_file), check_save=False)
-        assert main_window.editor.is_invalid_file is True
+        with patch.object(QMessageBox, 'warning') as mock_warning:
+            main_window._open_file_path(str(binary_file))
+            mock_warning.assert_called_once()
 
-    def test_open_incompatible_file_shows_overlay(self, main_window, tmp_path, qtbot):
-        """Test opening incompatible file shows striped overlay."""
+    def test_open_incompatible_file_does_not_change_editor(self, main_window, tmp_path, qtbot):
+        """Test opening incompatible file does not change the current editor content."""
+        initial_file = main_window.editor.current_file
+        
         binary_file = tmp_path / "test.bin"
         binary_file.write_bytes(b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR')
         
-        main_window._open_file_path(str(binary_file), check_save=False)
-        qtbot.wait(100)  # Wait for UI updates
-        assert hasattr(main_window, 'striped_overlay')
-        assert main_window.striped_overlay.isVisible()
+        with patch.object(QMessageBox, 'warning'):
+            main_window._open_file_path(str(binary_file))
+        
+        assert main_window.editor.current_file == initial_file
 
-    def test_open_valid_file_hides_overlay(self, main_window, tmp_path, qtbot):
-        """Test opening valid file hides striped overlay."""
-        # First open an invalid file
+    def test_open_valid_file_after_binary_attempt(self, main_window, tmp_path, qtbot):
+        """Test opening valid file after failed binary open attempt works."""
         binary_file = tmp_path / "test.bin"
         binary_file.write_bytes(b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR')
-        main_window._open_file_path(str(binary_file), check_save=False)
-        qtbot.wait(100)
         
-        # Then open a valid file
+        with patch.object(QMessageBox, 'warning'):
+            main_window._open_file_path(str(binary_file))
+        
         text_file = tmp_path / "test.txt"
         text_file.write_text("Hello, World!")
-        main_window._open_file_path(str(text_file), check_save=False)
-        qtbot.wait(100)
+        main_window._open_file_path(str(text_file))
         
-        assert main_window.editor.is_invalid_file is False
-        assert not main_window.striped_overlay.isVisible()
+        assert main_window.editor.current_file == str(text_file)
+        assert main_window.editor.toPlainText() == "Hello, World!"
 
-    def test_save_file_blocked_for_invalid_type(self, main_window, tmp_path, qtbot):
-        """Test save is blocked for invalid file types."""
-        binary_file = tmp_path / "test.bin"
-        binary_file.write_bytes(b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR')
+    def test_binary_detection_blocks_open(self, main_window, tmp_path, qtbot):
+        """Test binary file detection blocks file from being opened."""
+        binary_file = tmp_path / "test.exe"
+        binary_file.write_bytes(b'MZ\x90\x00\x03\x00\x00\x00')
         
-        main_window._open_file_path(str(binary_file), check_save=False)
-        qtbot.wait(100)
+        initial_tab_count = main_window.split_container.active_tab_widget().count()
         
-        # Save should just return without doing anything
-        main_window._save_file()
-        # If we get here without error, the test passes
-        assert main_window.save_action.isEnabled() is False
+        with patch.object(QMessageBox, 'warning'):
+            main_window._open_file_path(str(binary_file))
+        
+        assert main_window.split_container.active_tab_widget().count() == initial_tab_count
 
-    def test_save_as_blocked_for_invalid_type(self, main_window, tmp_path, qtbot):
-        """Test save as is blocked for invalid file types."""
-        binary_file = tmp_path / "test.bin"
-        binary_file.write_bytes(b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR')
-        
-        main_window._open_file_path(str(binary_file), check_save=False)
-        qtbot.wait(100)
-        
-        # Save As should just return without doing anything
-        main_window._save_file_as()
-        # If we get here without error, the test passes
-        assert main_window.save_as_action.isEnabled() is False
-
-    def test_new_file_resets_invalid_flag(self, main_window, tmp_path, qtbot):
-        """Test creating new file resets is_invalid_file flag."""
-        binary_file = tmp_path / "test.bin"
-        binary_file.write_bytes(b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR')
-        
-        main_window._open_file_path(str(binary_file), check_save=False)
-        assert main_window.editor.is_invalid_file is True
-        
+    def test_new_file_creates_valid_document(self, main_window, tmp_path, qtbot):
+        """Test creating new file creates a valid editable document."""
         main_window._new_file()
         assert main_window.editor.is_invalid_file is False
 
-    def test_open_valid_file_resets_invalid_flag(self, main_window, tmp_path, qtbot):
-        """Test opening valid file after invalid file resets flag."""
-        binary_file = tmp_path / "test.bin"
-        binary_file.write_bytes(b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR')
-        main_window._open_file_path(str(binary_file), check_save=False)
-        assert main_window.editor.is_invalid_file is True
-        
+    def test_open_valid_file_creates_valid_document(self, main_window, tmp_path, qtbot):
+        """Test opening valid text file creates a valid editable document."""
         text_file = tmp_path / "test.txt"
         text_file.write_text("Hello, World!")
-        main_window._open_file_path(str(text_file), check_save=False)
+        main_window._open_file_path(str(text_file))
         assert main_window.editor.is_invalid_file is False
 
 
@@ -1259,6 +1245,178 @@ class TestThemeToggle:
         assert main_window.editor.highlighter.dark_mode is False
         main_window._toggle_theme()
         assert main_window.editor.highlighter.dark_mode is True
+
+
+class TestDocument:
+    """Tests for the Document class."""
+
+    def test_document_creation(self):
+        """Test Document can be created."""
+        doc = Document()
+        assert doc.file_path is None
+        assert doc.is_modified is False
+
+    def test_document_with_path(self, tmp_path):
+        """Test Document with file path."""
+        file_path = str(tmp_path / "test.py")
+        doc = Document(file_path)
+        assert doc.file_path == file_path
+        assert doc.language == "python"
+
+    def test_document_modification_tracking(self):
+        """Test Document tracks modifications."""
+        doc = Document()
+        assert doc.is_modified is False
+        doc.document.setPlainText("hello")
+        assert doc.is_modified is True
+        doc.is_modified = False
+        assert doc.is_modified is False
+
+    def test_document_display_name_untitled(self):
+        """Test Document display name for untitled."""
+        doc = Document()
+        assert doc.display_name == "Untitled"
+
+    def test_document_display_name_with_path(self, tmp_path):
+        """Test Document display name with file path."""
+        file_path = str(tmp_path / "test.py")
+        doc = Document(file_path)
+        assert doc.display_name == "test.py"
+
+    def test_document_display_name_modified(self):
+        """Test Document display name when modified."""
+        doc = Document()
+        doc.document.setPlainText("hello")
+        assert doc.display_name == "Untitled *"
+
+    def test_document_view_count(self):
+        """Test Document view counting."""
+        doc = Document()
+        assert doc.view_count == 0
+        doc.add_view()
+        assert doc.view_count == 1
+        doc.add_view()
+        assert doc.view_count == 2
+        remaining = doc.remove_view()
+        assert remaining == 1
+        assert doc.view_count == 1
+
+
+class TestDocumentManager:
+    """Tests for the DocumentManager class."""
+
+    def test_document_manager_creation(self):
+        """Test DocumentManager can be created."""
+        mgr = DocumentManager()
+        assert len(mgr.documents) == 0
+
+    def test_create_new_document(self):
+        """Test creating a new document."""
+        mgr = DocumentManager()
+        doc = mgr.get_or_create_document()
+        assert doc is not None
+        assert len(mgr.documents) == 1
+
+    def test_create_document_with_path(self, tmp_path):
+        """Test creating document with file path."""
+        mgr = DocumentManager()
+        file_path = str(tmp_path / "test.py")
+        doc = mgr.get_or_create_document(file_path)
+        assert doc.file_path == file_path
+        assert len(mgr.documents) == 1
+
+    def test_get_existing_document(self, tmp_path):
+        """Test getting existing document by path."""
+        mgr = DocumentManager()
+        file_path = str(tmp_path / "test.py")
+        doc1 = mgr.get_or_create_document(file_path)
+        doc2 = mgr.get_or_create_document(file_path)
+        assert doc1 is doc2
+        assert len(mgr.documents) == 1
+
+    def test_close_document(self, tmp_path):
+        """Test closing a document."""
+        mgr = DocumentManager()
+        file_path = str(tmp_path / "test.py")
+        doc = mgr.get_or_create_document(file_path)
+        mgr.close_document(doc)
+        assert len(mgr.documents) == 0
+        assert mgr.get_document_by_path(file_path) is None
+
+    def test_has_unsaved_documents(self):
+        """Test checking for unsaved documents."""
+        mgr = DocumentManager()
+        doc = mgr.get_or_create_document()
+        assert mgr.has_unsaved_documents() is False
+        doc.document.setPlainText("hello")
+        assert mgr.has_unsaved_documents() is True
+
+
+class TestTabAndSplitFeatures:
+    """Tests for tab and split view functionality."""
+
+    def test_new_file_creates_tab(self, main_window, qtbot):
+        """Test that creating a new file creates a new tab."""
+        initial_count = main_window.split_container.active_tab_widget().count()
+        main_window._new_file()
+        assert main_window.split_container.active_tab_widget().count() == initial_count + 1
+
+    def test_open_file_creates_tab(self, main_window, tmp_path, qtbot):
+        """Test that opening a file creates a new tab."""
+        initial_count = main_window.split_container.active_tab_widget().count()
+        file_path = str(tmp_path / "test.txt")
+        with open(file_path, 'w') as f:
+            f.write("hello")
+        main_window._open_file_path(file_path)
+        assert main_window.split_container.active_tab_widget().count() == initial_count + 1
+
+    def test_open_same_file_focuses_existing_tab(self, main_window, tmp_path, qtbot):
+        """Test that opening same file focuses existing tab instead of creating new."""
+        file_path = str(tmp_path / "test.txt")
+        with open(file_path, 'w') as f:
+            f.write("hello")
+        main_window._open_file_path(file_path)
+        initial_count = main_window.split_container.active_tab_widget().count()
+        main_window._open_file_path(file_path)
+        assert main_window.split_container.active_tab_widget().count() == initial_count
+
+    def test_close_tab(self, main_window, qtbot):
+        """Test closing a tab."""
+        main_window._new_file()
+        initial_count = main_window.split_container.active_tab_widget().count()
+        main_window._close_current_tab()
+        assert main_window.split_container.active_tab_widget().count() == initial_count - 1
+
+    def test_split_right_creates_split(self, main_window, qtbot):
+        """Test split right creates a second split."""
+        assert main_window.split_container.count() == 1
+        main_window._split_right()
+        assert main_window.split_container.count() == 2
+
+    def test_split_down_creates_split(self, main_window, qtbot):
+        """Test split down creates a second split."""
+        assert main_window.split_container.count() == 1
+        main_window._split_down()
+        assert main_window.split_container.count() == 2
+
+    def test_close_split(self, main_window, qtbot):
+        """Test closing a split via close_split method directly."""
+        main_window._split_right()
+        assert main_window.split_container.count() == 2
+        active_tw = main_window.split_container.active_tab_widget()
+        main_window.split_container.close_split(active_tw)
+        qtbot.wait(100)
+        assert len(main_window.split_container._tab_widgets) == 1
+
+    def test_editor_property_returns_current_pane(self, main_window, qtbot):
+        """Test that editor property returns the current active pane."""
+        assert main_window.editor is not None
+        assert isinstance(main_window.editor, EditorPane)
+
+    def test_document_manager_exists(self, main_window, qtbot):
+        """Test that document manager exists on main window."""
+        assert hasattr(main_window, 'doc_manager')
+        assert isinstance(main_window.doc_manager, DocumentManager)
 
 
 if __name__ == "__main__":
