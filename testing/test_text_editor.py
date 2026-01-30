@@ -6,6 +6,7 @@ Run with: QT_QPA_PLATFORM=offscreen pytest test_text_editor.py -v
 import pytest
 import sys
 import os
+from pathlib import Path
 
 # Add parent directory to path for text_editor import
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -323,7 +324,7 @@ class TestFileTreeView:
         """Test setting root path."""
         file_tree.set_root_path(str(tmp_path))
         root_index = file_tree.rootIndex()
-        assert file_tree.model.filePath(root_index) == str(tmp_path)
+        assert Path(file_tree.model.filePath(root_index)) == Path(tmp_path)
 
     def test_get_file_path(self, file_tree, temp_file):
         """Test getting file path from index."""
@@ -332,7 +333,7 @@ class TestFileTreeView:
         
         index = file_tree.model.index(temp_file)
         path = file_tree.get_file_path(index)
-        assert path == temp_file
+        assert Path(path) == Path(temp_file)
 
     def test_is_directory(self, file_tree, tmp_path):
         """Test directory check."""
@@ -542,7 +543,7 @@ class TestFileOperations:
         
         root_index = main_window.file_tree.rootIndex()
         path = main_window.file_tree.model.filePath(root_index)
-        assert path == str(tmp_path)
+        assert Path(path) == Path(tmp_path)
 
     def test_open_file_path_error(self, main_window, tmp_path):
         """Test error handling when opening non-existent file."""
@@ -560,7 +561,7 @@ class TestFileOperations:
         main_window.file_tree.set_root_path(dir_path)
         index = main_window.file_tree.model.index(temp_file)
         main_window._on_file_double_clicked(index)
-        assert main_window.editor.current_file == temp_file
+        assert Path(main_window.editor.current_file) == Path(temp_file)
 
     def test_on_file_double_clicked_directory(self, main_window, tmp_path):
         """Test double-clicking a directory does not open it as file."""
@@ -679,7 +680,7 @@ class TestFileDialogs:
         with patch('text_editor.QFileDialog.getExistingDirectory', return_value=str(tmp_path)):
             main_window._open_folder()
             root_index = main_window.file_tree.rootIndex()
-            assert main_window.file_tree.model.filePath(root_index) == str(tmp_path)
+            assert Path(main_window.file_tree.model.filePath(root_index)) == Path(tmp_path)
 
     def test_open_folder_dialog_cancelled(self, main_window):
         """Test _open_folder when dialog is cancelled."""
