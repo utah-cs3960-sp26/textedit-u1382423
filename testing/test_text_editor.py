@@ -1418,6 +1418,30 @@ class TestTabAndSplitFeatures:
         assert hasattr(main_window, 'doc_manager')
         assert isinstance(main_window.doc_manager, DocumentManager)
 
+    def test_split_up_to_five(self, main_window, qtbot):
+        """Test that we can create up to 5 splits."""
+        assert main_window.split_container.count() == 1
+        for i in range(4):
+            main_window._split_right()
+            assert main_window.split_container.count() == i + 2
+        assert main_window.split_container.count() == 5
+
+    def test_split_limit_enforced(self, main_window, qtbot):
+        """Test that splitting beyond 5 is not allowed."""
+        for _ in range(4):
+            main_window._split_right()
+        assert main_window.split_container.count() == 5
+        main_window._split_right()
+        assert main_window.split_container.count() == 5
+
+    def test_split_sets_focus_to_new_pane(self, main_window, qtbot):
+        """Test that splitting moves focus to the new editor pane."""
+        main_window._split_right()
+        active_tw = main_window.split_container.active_tab_widget()
+        current_pane = active_tw.current_editor()
+        assert current_pane is not None
+        assert main_window.split_container.count() == 2
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

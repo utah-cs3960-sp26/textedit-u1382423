@@ -45,7 +45,7 @@ Added a tab-based document system with split view support, similar to VS Code. U
 - **DocumentManager**: Manages all open documents, provides lookup by file path, and prevents opening duplicate files.
 - **EditorPane**: Subclass of CodeEditor that delegates state (file_path, is_modified, language) to its Document. Emits `pane_focused` signal when clicked.
 - **EditorTabWidget**: QTabWidget managing multiple EditorPane tabs with close buttons. Tracks dark mode and propagates to new panes.
-- **SplitContainer**: QSplitter managing up to 2 EditorTabWidget splits. Tracks active split and updates visual indicators.
+- **SplitContainer**: QSplitter managing up to 5 EditorTabWidget splits. Tracks active split and updates visual indicators.
 
 ### Key Technical Decisions
 1. **QPlainTextDocumentLayout**: QPlainTextEdit requires a QPlainTextDocumentLayout on its document, so Document.__init__ must explicitly set the layout.

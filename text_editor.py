@@ -1712,14 +1712,18 @@ class SplitContainer(QSplitter):
         return None
     
     def split(self, orientation):
-        if self.count() >= 2:
+        if self.count() >= 5:
             return None
         
         self.setOrientation(orientation)
         new_tabs = self._create_tab_widget()
         self.addWidget(new_tabs)
         
-        sizes = [self.width() // 2, self.width() // 2] if orientation == Qt.Horizontal else [self.height() // 2, self.height() // 2]
+        # Divide space equally among all splits
+        num_splits = self.count()
+        total_size = self.width() if orientation == Qt.Horizontal else self.height()
+        equal_size = total_size // num_splits
+        sizes = [equal_size] * num_splits
         self.setSizes(sizes)
         
         self._active_tab_widget = new_tabs
@@ -2385,7 +2389,9 @@ class TextEditor(QMainWindow):
         new_tabs = self.split_container.split(Qt.Horizontal)
         if new_tabs is not None:
             doc = self.doc_manager.get_or_create_document()
-            self.split_container.open_document(doc)
+            pane = self.split_container.open_document(doc)
+            if pane:
+                pane.setFocus()
     
     def _split_down(self):
         """Split the editor vertically with a new blank tab."""
@@ -2397,7 +2403,9 @@ class TextEditor(QMainWindow):
         new_tabs = self.split_container.split(Qt.Vertical)
         if new_tabs is not None:
             doc = self.doc_manager.get_or_create_document()
-            self.split_container.open_document(doc)
+            pane = self.split_container.open_document(doc)
+            if pane:
+                pane.setFocus()
     
     def _close_split(self):
         """Close the current split."""
