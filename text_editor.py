@@ -1632,7 +1632,11 @@ class EditorTabWidget(QTabWidget):
 
 
 class SplitContainer(QSplitter):
-    """Container that manages horizontal/vertical splits of tab widgets."""
+    """Container that manages horizontal/vertical splits of tab widgets.
+    
+    Supports one level of nesting: top-level children can be EditorTabWidget
+    (leaf) or QSplitter (nested) whose children are EditorTabWidget leaves.
+    """
     
     active_editor_changed = pyqtSignal(object)
     
@@ -1640,7 +1644,6 @@ class SplitContainer(QSplitter):
         super().__init__(orientation, parent)
         self.doc_manager = doc_manager
         self._active_tab_widget = None
-        self._tab_widgets = []
         self._dark_mode = True
         
         first_tabs = self._create_tab_widget()
@@ -1648,31 +1651,45 @@ class SplitContainer(QSplitter):
         self._active_tab_widget = first_tabs
         self._update_active_indicators()
     
+    def _all_tab_widgets(self):
+        """Return all EditorTabWidget leaves, including those inside nested splitters."""
+        out = []
+        for i in range(self.count()):
+            child = self.widget(i)
+            if isinstance(child, EditorTabWidget):
+                out.append(child)
+            elif isinstance(child, QSplitter):
+                for j in range(child.count()):
+                    w = child.widget(j)
+                    if isinstance(w, EditorTabWidget):
+                        out.append(w)
+        return out
+    
     def _create_tab_widget(self):
-        tab_widget = EditorTabWidget(self.doc_manager, dark_mode=self._dark_mode, parent=self)
+        """Create a new EditorTabWidget with all signals connected."""
+        tab_widget = EditorTabWidget(self.doc_manager, dark_mode=self._dark_mode)
         tab_widget.tab_close_requested.connect(self._on_tab_close_requested)
         tab_widget.current_editor_changed.connect(self._on_editor_changed)
         tab_widget.all_tabs_closed.connect(self._on_all_tabs_closed)
         tab_widget.pane_focused.connect(self._on_pane_focused)
-        self._tab_widgets.append(tab_widget)
         return tab_widget
     
     def _on_pane_focused(self, tab_widget, pane):
         """Handle when a pane receives focus - update active split."""
-        if tab_widget in self._tab_widgets and self._active_tab_widget is not tab_widget:
+        if tab_widget in self._all_tab_widgets() and self._active_tab_widget is not tab_widget:
             self._active_tab_widget = tab_widget
             self._update_active_indicators()
             self.active_editor_changed.emit(pane)
     
     def _update_active_indicators(self):
         """Update the visual indicator showing which split is active."""
-        for tw in self._tab_widgets:
+        for tw in self._all_tab_widgets():
             tw.set_active_split(tw is self._active_tab_widget, self._dark_mode)
     
     def set_dark_mode(self, dark_mode):
         """Update dark mode setting and refresh indicators."""
         self._dark_mode = dark_mode
-        for tw in self._tab_widgets:
+        for tw in self._all_tab_widgets():
             tw.set_dark_mode(dark_mode)
         self._update_active_indicators()
     
@@ -1680,7 +1697,7 @@ class SplitContainer(QSplitter):
         return self._active_tab_widget
     
     def set_active_tab_widget(self, tab_widget):
-        if tab_widget in self._tab_widgets:
+        if tab_widget in self._all_tab_widgets():
             self._active_tab_widget = tab_widget
             self._update_active_indicators()
     
@@ -1689,14 +1706,18 @@ class SplitContainer(QSplitter):
             return self._active_tab_widget.current_editor()
         return None
     
+    def _total_leaf_count(self):
+        return len(self._all_tab_widgets())
+    
     def open_document(self, doc, in_new_split=False):
         if in_new_split and self._active_tab_widget is not None:
-            if self.count() < 2:
+            all_tw = self._all_tab_widgets()
+            if len(all_tw) < 2:
                 new_tabs = self._create_tab_widget()
                 self.addWidget(new_tabs)
                 self._active_tab_widget = new_tabs
             else:
-                for tw in self._tab_widgets:
+                for tw in all_tw:
                     if tw is not self._active_tab_widget:
                         self._active_tab_widget = tw
                         break
@@ -1707,7 +1728,7 @@ class SplitContainer(QSplitter):
         return None
     
     def focus_or_open_document(self, doc, allow_new_view=True):
-        for tw in self._tab_widgets:
+        for tw in self._all_tab_widgets():
             if tw.focus_document(doc):
                 self._active_tab_widget = tw
                 self._update_active_indicators()
@@ -1721,38 +1742,136 @@ class SplitContainer(QSplitter):
         return None
     
     def split(self, orientation):
-        if self.count() >= 5:
+        if self._total_leaf_count() >= 5:
             return None
         
-        self.setOrientation(orientation)
-        new_tabs = self._create_tab_widget()
-        self.addWidget(new_tabs)
+        leaf = self._active_tab_widget
+        if leaf is None:
+            return None
         
-        # Divide space equally among all splits
-        num_splits = self.count()
-        total_size = self.width() if orientation == Qt.Horizontal else self.height()
-        equal_size = total_size // num_splits
-        sizes = [equal_size] * num_splits
-        self.setSizes(sizes)
+        parent = leaf.parentWidget()
         
-        self._active_tab_widget = new_tabs
-        self._update_active_indicators()
-        return new_tabs
+        if orientation == self.orientation():
+            new_tabs = self._create_tab_widget()
+            if isinstance(parent, QSplitter) and parent is not self:
+                insert_at = self.indexOf(parent) + 1
+            else:
+                insert_at = self.indexOf(leaf) + 1
+            self.insertWidget(insert_at, new_tabs)
+            
+            num_splits = self.count()
+            total_size = self.width() if orientation == Qt.Horizontal else self.height()
+            equal_size = total_size // max(num_splits, 1)
+            self.setSizes([equal_size] * num_splits)
+            
+            self._active_tab_widget = new_tabs
+            self._update_active_indicators()
+            return new_tabs
+        else:
+            if isinstance(parent, QSplitter) and parent is not self:
+                if parent.orientation() == orientation:
+                    new_tabs = self._create_tab_widget()
+                    insert_at = parent.indexOf(leaf) + 1
+                    parent.insertWidget(insert_at, new_tabs)
+                    
+                    num = parent.count()
+                    total_size = parent.height() if orientation == Qt.Vertical else parent.width()
+                    equal_size = max(total_size // num, 50)
+                    parent.setSizes([equal_size] * num)
+                    
+                    self._active_tab_widget = new_tabs
+                    self._update_active_indicators()
+                    return new_tabs
+                # Orientation mismatch would require 2-deep nesting; block it
+                return None
+            
+            idx = self.indexOf(leaf)
+            nested = QSplitter(orientation)
+            nested.setChildrenCollapsible(False)
+            
+            self.replaceWidget(idx, nested)
+            nested.addWidget(leaf)
+            new_tabs = self._create_tab_widget()
+            nested.addWidget(new_tabs)
+            
+            total_size = nested.height() if orientation == Qt.Vertical else nested.width()
+            half = max(total_size // 2, 100)
+            nested.setSizes([half, half])
+            
+            self._active_tab_widget = new_tabs
+            self._update_active_indicators()
+            return new_tabs
+    
+    def _close_all_tabs_in_widget(self, tab_widget):
+        """Close all tabs in a tab widget, running proper cleanup for each pane."""
+        for i in range(tab_widget.count() - 1, -1, -1):
+            pane = tab_widget.widget(i)
+            remaining = tab_widget.close_tab(i)
+            if remaining == 0 and pane:
+                self.doc_manager.close_document(pane.doc)
+    
+    def _remove_tab_widget(self, tab_widget):
+        """Close all tabs, detach, and schedule a tab widget for deletion."""
+        tab_widget.all_tabs_closed.disconnect(self._on_all_tabs_closed)
+        self._close_all_tabs_in_widget(tab_widget)
+        tab_widget.setParent(None)
+        tab_widget.deleteLater()
     
     def close_split(self, tab_widget=None):
+        """Close a split pane, unwrapping nested splitters as needed."""
         if tab_widget is None:
             tab_widget = self._active_tab_widget
         
-        if tab_widget is not None and tab_widget in self._tab_widgets and self.count() > 1:
-            self._tab_widgets.remove(tab_widget)
-            tab_widget.setParent(None)
-            tab_widget.deleteLater()
+        if tab_widget is None:
+            return
+        
+        all_tw = self._all_tab_widgets()
+        if len(all_tw) <= 1:
+            return
+        
+        parent = tab_widget.parentWidget()
+        
+        if isinstance(parent, QSplitter) and parent is not self:
+            self._remove_tab_widget(tab_widget)
             
-            if self._tab_widgets:
-                self._active_tab_widget = self._tab_widgets[0]
-            else:
-                self._active_tab_widget = None
-            self._update_active_indicators()
+            if parent.count() == 1:
+                remaining = parent.widget(0)
+                top_idx = self.indexOf(parent)
+                self.replaceWidget(top_idx, remaining)
+                parent.setParent(None)
+                parent.deleteLater()
+            
+            self._select_new_active()
+            
+            # Defensive: unwrap if only a nested splitter remains at top level
+            if self.count() == 1 and isinstance(self.widget(0), QSplitter):
+                self._unwrap_nested(self.widget(0))
+                self._select_new_active()
+        elif parent is self and self.count() > 1:
+            self._remove_tab_widget(tab_widget)
+            
+            if self.count() == 1 and isinstance(self.widget(0), QSplitter):
+                self._unwrap_nested(self.widget(0))
+            
+            self._select_new_active()
+    
+    def _select_new_active(self):
+        """Select the first available tab widget as active."""
+        new_all = self._all_tab_widgets()
+        if new_all:
+            self._active_tab_widget = new_all[0]
+            self._active_tab_widget.setFocus()
+        else:
+            self._active_tab_widget = None
+        self._update_active_indicators()
+    
+    def _unwrap_nested(self, nested):
+        """Promote a nested splitter's children to top level and remove the splitter."""
+        self.setOrientation(nested.orientation())
+        while nested.count() > 0:
+            self.addWidget(nested.widget(0))
+        nested.setParent(None)
+        nested.deleteLater()
     
     def _on_tab_close_requested(self, tab_widget, index):
         pane = tab_widget.widget(index)
@@ -1782,7 +1901,7 @@ class SplitContainer(QSplitter):
     
     def _on_editor_changed(self, pane):
         if pane:
-            for tw in self._tab_widgets:
+            for tw in self._all_tab_widgets():
                 if tw.current_editor() is pane:
                     if self._active_tab_widget is not tw:
                         self._active_tab_widget = tw
@@ -1791,7 +1910,7 @@ class SplitContainer(QSplitter):
             self.active_editor_changed.emit(pane)
     
     def _on_all_tabs_closed(self, tab_widget):
-        if self.count() > 1:
+        if self._total_leaf_count() > 1:
             self.close_split(tab_widget)
 
 
@@ -2420,7 +2539,7 @@ class TextEditor(QMainWindow):
     
     def _close_split(self):
         """Close the current split."""
-        if self.split_container.count() > 1:
+        if self.split_container._total_leaf_count() > 1:
             active_tw = self.split_container.active_tab_widget()
             if active_tw:
                 for i in range(active_tw.count() - 1, -1, -1):

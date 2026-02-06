@@ -1389,24 +1389,24 @@ class TestTabAndSplitFeatures:
 
     def test_split_right_creates_split(self, main_window, qtbot):
         """Test split right creates a second split."""
-        assert main_window.split_container.count() == 1
+        assert main_window.split_container._total_leaf_count() == 1
         main_window._split_right()
-        assert main_window.split_container.count() == 2
+        assert main_window.split_container._total_leaf_count() == 2
 
     def test_split_down_creates_split(self, main_window, qtbot):
-        """Test split down creates a second split."""
-        assert main_window.split_container.count() == 1
+        """Test split down creates a second split (nested since default is horizontal)."""
+        assert main_window.split_container._total_leaf_count() == 1
         main_window._split_down()
-        assert main_window.split_container.count() == 2
+        assert main_window.split_container._total_leaf_count() == 2
 
     def test_close_split(self, main_window, qtbot):
         """Test closing a split via close_split method directly."""
         main_window._split_right()
-        assert main_window.split_container.count() == 2
+        assert main_window.split_container._total_leaf_count() == 2
         active_tw = main_window.split_container.active_tab_widget()
         main_window.split_container.close_split(active_tw)
         qtbot.wait(100)
-        assert len(main_window.split_container._tab_widgets) == 1
+        assert len(main_window.split_container._all_tab_widgets()) == 1
 
     def test_editor_property_returns_current_pane(self, main_window, qtbot):
         """Test that editor property returns the current active pane."""
@@ -1420,19 +1420,19 @@ class TestTabAndSplitFeatures:
 
     def test_split_up_to_five(self, main_window, qtbot):
         """Test that we can create up to 5 splits."""
-        assert main_window.split_container.count() == 1
+        assert main_window.split_container._total_leaf_count() == 1
         for i in range(4):
             main_window._split_right()
-            assert main_window.split_container.count() == i + 2
-        assert main_window.split_container.count() == 5
+            assert main_window.split_container._total_leaf_count() == i + 2
+        assert main_window.split_container._total_leaf_count() == 5
 
     def test_split_limit_enforced(self, main_window, qtbot):
         """Test that splitting beyond 5 is not allowed."""
         for _ in range(4):
             main_window._split_right()
-        assert main_window.split_container.count() == 5
+        assert main_window.split_container._total_leaf_count() == 5
         main_window._split_right()
-        assert main_window.split_container.count() == 5
+        assert main_window.split_container._total_leaf_count() == 5
 
     def test_split_sets_focus_to_new_pane(self, main_window, qtbot):
         """Test that splitting moves focus to the new editor pane."""
@@ -1440,7 +1440,129 @@ class TestTabAndSplitFeatures:
         active_tw = main_window.split_container.active_tab_widget()
         current_pane = active_tw.current_editor()
         assert current_pane is not None
+        assert main_window.split_container._total_leaf_count() == 2
+
+    def test_nested_split(self, main_window, qtbot):
+        """Test that splitting in opposite direction creates a nested split."""
+        assert main_window.split_container._total_leaf_count() == 1
+        main_window._split_down()
+        assert main_window.split_container._total_leaf_count() == 2
+        assert main_window.split_container.count() == 1
+        from PyQt5.QtWidgets import QSplitter
+        assert isinstance(main_window.split_container.widget(0), QSplitter)
+
+    def test_nested_split_orientation(self, main_window, qtbot):
+        """Test that nested split has the opposite orientation."""
+        from PyQt5.QtWidgets import QSplitter
+        assert main_window.split_container.orientation() == Qt.Horizontal
+        main_window._split_down()
+        nested = main_window.split_container.widget(0)
+        assert isinstance(nested, QSplitter)
+        assert nested.orientation() == Qt.Vertical
+
+    def test_split_down_then_split_right(self, main_window, qtbot):
+        """Test splitting down then right creates top-level + nested layout."""
+        from PyQt5.QtWidgets import QSplitter
+        main_window._split_down()
+        assert main_window.split_container._total_leaf_count() == 2
+        main_window._split_right()
+        assert main_window.split_container._total_leaf_count() == 3
         assert main_window.split_container.count() == 2
+        assert isinstance(main_window.split_container.widget(0), QSplitter)
+        assert isinstance(main_window.split_container.widget(1), EditorTabWidget)
+
+    def test_close_right_after_nested_split(self, main_window, qtbot):
+        """Test closing the right split after split down then split right."""
+        main_window._split_down()
+        main_window._split_right()
+        assert main_window.split_container._total_leaf_count() == 3
+        main_window._close_split()
+        qtbot.wait(100)
+        assert main_window.split_container._total_leaf_count() == 2
+
+    def test_close_nested_pane_unwraps(self, main_window, qtbot):
+        """Test that closing one pane of a nested split unwraps the nested splitter."""
+        from PyQt5.QtWidgets import QSplitter
+        main_window._split_down()
+        assert isinstance(main_window.split_container.widget(0), QSplitter)
+        active_tw = main_window.split_container.active_tab_widget()
+        main_window.split_container.close_split(active_tw)
+        qtbot.wait(100)
+        assert main_window.split_container._total_leaf_count() == 1
+        assert isinstance(main_window.split_container.widget(0), EditorTabWidget)
+
+    def test_nested_pane_never_creates_double_nesting(self, main_window, qtbot):
+        """Test that splitting from a nested pane never creates a 2-deep nesting."""
+        from PyQt5.QtWidgets import QSplitter
+        main_window._split_down()
+        active = main_window.split_container.active_tab_widget()
+        assert isinstance(active.parentWidget(), QSplitter)
+        assert active.parentWidget() is not main_window.split_container
+        main_window._split_down()
+        assert main_window.split_container._total_leaf_count() == 3
+        main_window._split_right()
+        assert main_window.split_container._total_leaf_count() == 4
+        for i in range(main_window.split_container.count()):
+            child = main_window.split_container.widget(i)
+            if isinstance(child, QSplitter):
+                for j in range(child.count()):
+                    assert isinstance(child.widget(j), EditorTabWidget)
+
+    def test_nested_pane_can_split_same_as_top_level(self, main_window, qtbot):
+        """Test that a pane inside a nested split can still split in the top-level direction (adds at top level)."""
+        main_window._split_down()
+        assert main_window.split_container._total_leaf_count() == 2
+        result = main_window.split_container.split(Qt.Horizontal)
+        assert result is not None
+        assert main_window.split_container._total_leaf_count() == 3
+
+    def test_repeated_split_down(self, main_window, qtbot):
+        """Test that splitting down multiple times adds panes to the nested splitter."""
+        from PyQt5.QtWidgets import QSplitter
+        for i in range(4):
+            main_window._split_down()
+            assert main_window.split_container._total_leaf_count() == i + 2
+        assert main_window.split_container._total_leaf_count() == 5
+        nested = main_window.split_container.widget(0)
+        assert isinstance(nested, QSplitter)
+        assert nested.count() == 5
+
+    def test_split_right_then_down_nests_active(self, main_window, qtbot):
+        """Test split right then split down nests the active right pane."""
+        from PyQt5.QtWidgets import QSplitter
+        main_window._split_right()
+        assert main_window.split_container._total_leaf_count() == 2
+        assert main_window.split_container.count() == 2
+        main_window._split_down()
+        assert main_window.split_container._total_leaf_count() == 3
+        assert main_window.split_container.count() == 2
+        assert isinstance(main_window.split_container.widget(1), QSplitter)
+
+    def test_close_all_nested_then_top_unwraps(self, main_window, qtbot):
+        """Test closing a top-level pane when only a nested splitter remains triggers unwrap."""
+        from PyQt5.QtWidgets import QSplitter
+        main_window._split_right()
+        main_window._split_down()
+        assert main_window.split_container._total_leaf_count() == 3
+        first_tw = main_window.split_container._all_tab_widgets()[0]
+        assert first_tw.parentWidget() is main_window.split_container
+        main_window.split_container.set_active_tab_widget(first_tw)
+        main_window._close_split()
+        qtbot.wait(100)
+        assert main_window.split_container._total_leaf_count() == 2
+        for i in range(main_window.split_container.count()):
+            assert isinstance(main_window.split_container.widget(i), EditorTabWidget)
+
+    def test_focus_document_across_nested_splits(self, main_window, qtbot):
+        """Test that focus_or_open_document finds docs in nested panes."""
+        main_window._split_down()
+        all_tw = main_window.split_container._all_tab_widgets()
+        first_tw = all_tw[0]
+        doc = first_tw.current_editor().doc
+        main_window.split_container.set_active_tab_widget(all_tw[1])
+        pane = main_window.split_container.focus_or_open_document(doc)
+        assert pane is not None
+        assert pane.doc is doc
 
 
 if __name__ == "__main__":
