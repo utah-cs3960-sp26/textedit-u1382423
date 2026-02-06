@@ -1568,8 +1568,12 @@ class EditorTabWidget(QTabWidget):
         index = self.addTab(pane, doc.display_name)
         self.setCurrentIndex(index)
         
-        doc.modified_changed.connect(lambda m: self._update_tab_title(pane))
-        doc.file_path_changed.connect(lambda p: self._update_tab_title(pane))
+        mod_handler = lambda m: self._update_tab_title(pane)
+        path_handler = lambda p: self._update_tab_title(pane)
+        doc.modified_changed.connect(mod_handler)
+        doc.file_path_changed.connect(path_handler)
+        pane._doc_connections = [(doc, 'modified_changed', mod_handler),
+                                 (doc, 'file_path_changed', path_handler)]
         pane.pane_focused.connect(self._on_pane_focused)
         
         return pane
@@ -1611,6 +1615,11 @@ class EditorTabWidget(QTabWidget):
     def close_tab(self, index):
         pane = self.widget(index)
         if pane:
+            for doc, signal_name, handler in getattr(pane, '_doc_connections', []):
+                try:
+                    getattr(doc, signal_name).disconnect(handler)
+                except (TypeError, RuntimeError):
+                    pass
             remaining_views = pane.cleanup()
             self.removeTab(index)
             pane.deleteLater()
@@ -2356,19 +2365,21 @@ class TextEditor(QMainWindow):
             self.toggle_theme_action.setText("Switch to &Dark Mode")
         
         self.split_container.set_dark_mode(self.dark_mode)
-        
-        for tw in self.split_container._tab_widgets:
-            for i in range(tw.count()):
-                pane = tw.widget(i)
-                if pane:
-                    pane.set_dark_mode(self.dark_mode)
     
     def _on_active_editor_changed(self, pane):
         """Handle when active editor changes."""
+        if hasattr(self, '_cursor_connected_pane') and self._cursor_connected_pane is not None:
+            try:
+                self._cursor_connected_pane.cursorPositionChanged.disconnect(self._update_cursor_position)
+            except (TypeError, RuntimeError):
+                pass
         if pane:
             self._update_window_title()
             self._update_cursor_position()
             pane.cursorPositionChanged.connect(self._update_cursor_position)
+            self._cursor_connected_pane = pane
+        else:
+            self._cursor_connected_pane = None
     
     def _update_window_title(self):
         """Update window title based on current document."""
