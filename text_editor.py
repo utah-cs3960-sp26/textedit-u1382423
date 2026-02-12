@@ -11,7 +11,7 @@ from PyQt5.QtWidgets import (
     QHBoxLayout, QTreeView, QSplitter, QFileDialog, QMessageBox,
     QAction, QMenuBar, QToolBar, QStatusBar, QFileSystemModel,
     QInputDialog, QShortcut, QTextEdit, QLabel, QDialog, QPushButton,
-    QLineEdit, QCheckBox, QTabWidget, QTabBar
+    QLineEdit, QCheckBox, QTabWidget, QTabBar, QMenu, QToolButton
 )
 from PyQt5.QtCore import Qt, QDir, QModelIndex, QRect, pyqtSignal, QObject
 from PyQt5.QtGui import (
@@ -1652,18 +1652,19 @@ class SplitContainer(QSplitter):
         self._update_active_indicators()
     
     def _all_tab_widgets(self):
-        """Return all EditorTabWidget leaves, including those inside nested splitters."""
+        """Return all EditorTabWidget leaves, recursing into nested splitters."""
         out = []
-        for i in range(self.count()):
-            child = self.widget(i)
+        self._collect_tab_widgets(self, out)
+        return out
+    
+    @staticmethod
+    def _collect_tab_widgets(splitter, out):
+        for i in range(splitter.count()):
+            child = splitter.widget(i)
             if isinstance(child, EditorTabWidget):
                 out.append(child)
             elif isinstance(child, QSplitter):
-                for j in range(child.count()):
-                    w = child.widget(j)
-                    if isinstance(w, EditorTabWidget):
-                        out.append(w)
-        return out
+                SplitContainer._collect_tab_widgets(child, out)
     
     def _create_tab_widget(self):
         """Create a new EditorTabWidget with all signals connected."""
@@ -1741,7 +1742,48 @@ class SplitContainer(QSplitter):
             return self.open_document(doc)
         return None
     
+    def add_pane(self, orientation):
+        """Add a new workspace-level tab widget without disturbing existing layout.
+        
+        If the top-level orientation matches, appends at the end.
+        If it differs and there's only one top-level child, changes orientation.
+        Otherwise wraps all existing children in a nested splitter and appends.
+        """
+        if self._total_leaf_count() >= 5:
+            return None
+        
+        new_tabs = self._create_tab_widget()
+        
+        if orientation == self.orientation() or self.count() <= 1:
+            if orientation != self.orientation():
+                self.setOrientation(orientation)
+            self.addWidget(new_tabs)
+        else:
+            wrapper = QSplitter(self.orientation())
+            wrapper.setChildrenCollapsible(False)
+            while self.count():
+                wrapper.addWidget(self.widget(0))
+            self.setOrientation(orientation)
+            self.addWidget(wrapper)
+            self.addWidget(new_tabs)
+            total_size = self.width() if orientation == Qt.Horizontal else self.height()
+            half = max(total_size // 2, 100)
+            self.setSizes([half, half])
+            self._active_tab_widget = new_tabs
+            self._update_active_indicators()
+            return new_tabs
+        
+        num_splits = self.count()
+        total_size = self.width() if orientation == Qt.Horizontal else self.height()
+        equal_size = total_size // max(num_splits, 1)
+        self.setSizes([equal_size] * num_splits)
+        
+        self._active_tab_widget = new_tabs
+        self._update_active_indicators()
+        return new_tabs
+    
     def split(self, orientation):
+        """Split the active tab widget by inserting a new pane next to it."""
         if self._total_leaf_count() >= 5:
             return None
         
@@ -1751,12 +1793,44 @@ class SplitContainer(QSplitter):
         
         parent = leaf.parentWidget()
         
+        # Leaf is inside a nested splitter
+        if isinstance(parent, QSplitter) and parent is not self:
+            if parent.orientation() == orientation:
+                # Same orientation as parent nested splitter: insert next to leaf
+                new_tabs = self._create_tab_widget()
+                insert_at = parent.indexOf(leaf) + 1
+                parent.insertWidget(insert_at, new_tabs)
+                
+                num = parent.count()
+                total_size = parent.height() if orientation == Qt.Vertical else parent.width()
+                equal_size = max(total_size // num, 50)
+                parent.setSizes([equal_size] * num)
+                
+                self._active_tab_widget = new_tabs
+                self._update_active_indicators()
+                return new_tabs
+            else:
+                # Different orientation: wrap leaf in a new nested splitter
+                idx = parent.indexOf(leaf)
+                nested = QSplitter(orientation)
+                nested.setChildrenCollapsible(False)
+                parent.replaceWidget(idx, nested)
+                nested.addWidget(leaf)
+                new_tabs = self._create_tab_widget()
+                nested.addWidget(new_tabs)
+                
+                total_size = nested.height() if orientation == Qt.Vertical else nested.width()
+                half = max(total_size // 2, 100)
+                nested.setSizes([half, half])
+                
+                self._active_tab_widget = new_tabs
+                self._update_active_indicators()
+                return new_tabs
+        
+        # Leaf is a direct child of the top-level splitter
         if orientation == self.orientation():
             new_tabs = self._create_tab_widget()
-            if isinstance(parent, QSplitter) and parent is not self:
-                insert_at = self.indexOf(parent) + 1
-            else:
-                insert_at = self.indexOf(leaf) + 1
+            insert_at = self.indexOf(leaf) + 1
             self.insertWidget(insert_at, new_tabs)
             
             num_splits = self.count()
@@ -1768,23 +1842,6 @@ class SplitContainer(QSplitter):
             self._update_active_indicators()
             return new_tabs
         else:
-            if isinstance(parent, QSplitter) and parent is not self:
-                if parent.orientation() == orientation:
-                    new_tabs = self._create_tab_widget()
-                    insert_at = parent.indexOf(leaf) + 1
-                    parent.insertWidget(insert_at, new_tabs)
-                    
-                    num = parent.count()
-                    total_size = parent.height() if orientation == Qt.Vertical else parent.width()
-                    equal_size = max(total_size // num, 50)
-                    parent.setSizes([equal_size] * num)
-                    
-                    self._active_tab_widget = new_tabs
-                    self._update_active_indicators()
-                    return new_tabs
-                # Orientation mismatch would require 2-deep nesting; block it
-                return None
-            
             idx = self.indexOf(leaf)
             nested = QSplitter(orientation)
             nested.setChildrenCollapsible(False)
@@ -1812,7 +1869,10 @@ class SplitContainer(QSplitter):
     
     def _remove_tab_widget(self, tab_widget):
         """Close all tabs, detach, and schedule a tab widget for deletion."""
-        tab_widget.all_tabs_closed.disconnect(self._on_all_tabs_closed)
+        try:
+            tab_widget.all_tabs_closed.disconnect(self._on_all_tabs_closed)
+        except (TypeError, RuntimeError):
+            pass
         self._close_all_tabs_in_widget(tab_widget)
         tab_widget.setParent(None)
         tab_widget.deleteLater()
@@ -1830,30 +1890,31 @@ class SplitContainer(QSplitter):
             return
         
         parent = tab_widget.parentWidget()
+        self._remove_tab_widget(tab_widget)
         
+        # Walk up collapsing any splitter left with a single child
         if isinstance(parent, QSplitter) and parent is not self:
-            self._remove_tab_widget(tab_widget)
-            
-            if parent.count() == 1:
-                remaining = parent.widget(0)
-                top_idx = self.indexOf(parent)
-                self.replaceWidget(top_idx, remaining)
-                parent.setParent(None)
-                parent.deleteLater()
-            
-            self._select_new_active()
-            
-            # Defensive: unwrap if only a nested splitter remains at top level
-            if self.count() == 1 and isinstance(self.widget(0), QSplitter):
-                self._unwrap_nested(self.widget(0))
-                self._select_new_active()
-        elif parent is self and self.count() > 1:
-            self._remove_tab_widget(tab_widget)
-            
-            if self.count() == 1 and isinstance(self.widget(0), QSplitter):
-                self._unwrap_nested(self.widget(0))
-            
-            self._select_new_active()
+            self._collapse_single_child_splitters(parent)
+        
+        # Final cleanup: unwrap if only a nested splitter remains at top level
+        if self.count() == 1 and isinstance(self.widget(0), QSplitter):
+            self._unwrap_nested(self.widget(0))
+        
+        self._select_new_active()
+    
+    def _collapse_single_child_splitters(self, splitter):
+        """Walk up from splitter, replacing any single-child splitter with its child."""
+        while isinstance(splitter, QSplitter) and splitter is not self and splitter.count() == 1:
+            remaining = splitter.widget(0)
+            parent = splitter.parentWidget()
+            if isinstance(parent, QSplitter):
+                idx = parent.indexOf(splitter)
+                parent.replaceWidget(idx, remaining)
+                splitter.setParent(None)
+                splitter.deleteLater()
+                splitter = parent
+            else:
+                break
     
     def _select_new_active(self):
         """Select the first available tab widget as active."""
@@ -2193,6 +2254,17 @@ class TextEditor(QMainWindow):
         toolbar.addSeparator()
         toolbar.addAction("Undo", self._undo)
         toolbar.addAction("Redo", self._redo)
+        toolbar.addSeparator()
+        
+        add_workspace_menu = QMenu(self)
+        add_workspace_menu.addAction("Vertical", self._add_workspace_horizontal)
+        add_workspace_menu.addAction("Horizontal", self._add_workspace_vertical)
+        
+        add_workspace_btn = QToolButton(self)
+        add_workspace_btn.setText("Add Workspace")
+        add_workspace_btn.setMenu(add_workspace_menu)
+        add_workspace_btn.setPopupMode(QToolButton.InstantPopup)
+        toolbar.addWidget(add_workspace_btn)
     
     def _setup_statusbar(self):
         """Set up the status bar."""
@@ -2511,7 +2583,6 @@ class TextEditor(QMainWindow):
     
     def _split_right(self):
         """Split the editor horizontally with a new blank tab."""
-        # If no tabs are open, just create a blank tab instead of splitting
         active_tw = self.split_container.active_tab_widget()
         if active_tw is not None and active_tw.count() == 0:
             self._new_file()
@@ -2525,12 +2596,29 @@ class TextEditor(QMainWindow):
     
     def _split_down(self):
         """Split the editor vertically with a new blank tab."""
-        # If no tabs are open, just create a blank tab instead of splitting
         active_tw = self.split_container.active_tab_widget()
         if active_tw is not None and active_tw.count() == 0:
             self._new_file()
             return
         new_tabs = self.split_container.split(Qt.Vertical)
+        if new_tabs is not None:
+            doc = self.doc_manager.get_or_create_document()
+            pane = self.split_container.open_document(doc)
+            if pane:
+                pane.setFocus()
+    
+    def _add_workspace_horizontal(self):
+        """Add a new workspace tab to the right."""
+        new_tabs = self.split_container.add_pane(Qt.Horizontal)
+        if new_tabs is not None:
+            doc = self.doc_manager.get_or_create_document()
+            pane = self.split_container.open_document(doc)
+            if pane:
+                pane.setFocus()
+    
+    def _add_workspace_vertical(self):
+        """Add a new workspace tab to the bottom."""
+        new_tabs = self.split_container.add_pane(Qt.Vertical)
         if new_tabs is not None:
             doc = self.doc_manager.get_or_create_document()
             pane = self.split_container.open_document(doc)
@@ -2773,47 +2861,44 @@ class TextEditor(QMainWindow):
         """Check if any documents need saving before closing."""
         if getattr(self, '_skip_save_check', False):
             return True
+        if not hasattr(self, 'doc_manager') or self.doc_manager is None:
+            return True
+        
         try:
-            if not hasattr(self, 'doc_manager') or self.doc_manager is None:
-                return True
-            
+            docs = list(self.doc_manager.documents)
+        except (RuntimeError, AttributeError):
+            return True
+        
+        for doc in docs:
             try:
-                docs = list(self.doc_manager.documents)
-            except (RuntimeError, AttributeError):
-                return True
-            
-            for doc in docs:
+                if doc is None:
+                    continue
                 try:
-                    if doc is None:
-                        continue
-                    try:
-                        is_mod = doc.is_modified
-                    except (RuntimeError, AttributeError, OSError):
-                        continue
-                    if is_mod:
-                        reply = QMessageBox.question(
-                            self, "Save Changes?",
-                            f"'{doc.display_name}' has unsaved changes. Save?",
-                            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel
-                        )
-                        if reply == QMessageBox.Cancel:
-                            return False
-                        if reply == QMessageBox.Save:
-                            if doc.file_path:
-                                if not self._save_document(doc):
-                                    return False
-                            else:
-                                self.split_container.focus_or_open_document(doc)
-                                self._save_file_as()
-                                try:
-                                    if doc.is_modified:
-                                        return False
-                                except (RuntimeError, AttributeError, OSError):
-                                    pass
+                    is_mod = doc.is_modified
                 except (RuntimeError, AttributeError, OSError):
                     continue
-        except (RuntimeError, AttributeError, OSError):
-            pass
+                if is_mod:
+                    reply = QMessageBox.question(
+                        self, "Save Changes?",
+                        f"'{doc.display_name}' has unsaved changes. Save?",
+                        QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel
+                    )
+                    if reply == QMessageBox.Cancel:
+                        return False
+                    if reply == QMessageBox.Save:
+                        if doc.file_path:
+                            if not self._save_document(doc):
+                                return False
+                        else:
+                            self.split_container.focus_or_open_document(doc)
+                            self._save_file_as()
+                            try:
+                                if doc.is_modified:
+                                    return False
+                            except (RuntimeError, AttributeError, OSError):
+                                pass
+            except (RuntimeError, AttributeError, OSError):
+                continue
         return True
     
     def _toggle_file_tree(self):
@@ -2849,5 +2934,5 @@ def main():
     sys.exit(app.exec_())
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     main()

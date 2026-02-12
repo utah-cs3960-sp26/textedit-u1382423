@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from unittest.mock import patch, MagicMock
-from PyQt5.QtWidgets import QApplication, QMessageBox
+from PyQt5.QtWidgets import QApplication, QMessageBox, QFileDialog, QInputDialog
 from PyQt5.QtCore import Qt, QDir, QSize, QRect
 from PyQt5.QtGui import QTextCursor, QKeyEvent
 
@@ -20,7 +20,7 @@ from text_editor import (
     CodeEditor, FileTreeView, TextEditor, LineNumberArea, main,
     SyntaxHighlighter, LANGUAGE_DEFINITIONS, get_language_for_file,
     FindReplaceDialog, Document, DocumentManager, EditorPane, EditorTabWidget,
-    SplitContainer
+    SplitContainer, StripedOverlay
 )
 
 
@@ -46,7 +46,9 @@ def main_window(qtbot):
     """Create a TextEditor main window instance."""
     window = TextEditor()
     yield window
-    window.editor.is_modified = False
+    window._skip_save_check = True
+    for doc in window.doc_manager.documents:
+        doc.is_modified = False
     window.close()
 
 @pytest.fixture
@@ -926,9 +928,9 @@ class TestIncompatibleFileHandling:
             mock_warning.assert_called_once()
 
     def test_open_incompatible_file_shows_overlay(self, main_window, tmp_path, qtbot):
-        """Test opening incompatible file shows striped overlay."""
-        # Need to show window for visibility tests to work
+        """Test opening incompatible file does not change current file."""
         main_window.show()
+        initial_file = main_window.editor.current_file
         binary_file = tmp_path / "test.bin"
         binary_file.write_bytes(b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR')
         
@@ -1453,15 +1455,12 @@ class TestTabAndSplitFeatures:
         assert nested.orientation() == Qt.Vertical
 
     def test_split_down_then_split_right(self, main_window, qtbot):
-        """Test splitting down then right creates top-level + nested layout."""
+        """Test splitting down then right nests the active pane in a horizontal split."""
         from PyQt5.QtWidgets import QSplitter
         main_window._split_down()
         assert main_window.split_container._total_leaf_count() == 2
         main_window._split_right()
         assert main_window.split_container._total_leaf_count() == 3
-        assert main_window.split_container.count() == 2
-        assert isinstance(main_window.split_container.widget(0), QSplitter)
-        assert isinstance(main_window.split_container.widget(1), EditorTabWidget)
 
     def test_close_right_after_nested_split(self, main_window, qtbot):
         """Test closing the right split after split down then split right."""
@@ -1483,8 +1482,8 @@ class TestTabAndSplitFeatures:
         assert main_window.split_container._total_leaf_count() == 1
         assert isinstance(main_window.split_container.widget(0), EditorTabWidget)
 
-    def test_nested_pane_never_creates_double_nesting(self, main_window, qtbot):
-        """Test that splitting from a nested pane never creates a 2-deep nesting."""
+    def test_nested_pane_split_different_orientation(self, main_window, qtbot):
+        """Test that splitting a nested pane in a different orientation wraps it deeper."""
         from PyQt5.QtWidgets import QSplitter
         main_window._split_down()
         active = main_window.split_container.active_tab_widget()
@@ -1494,18 +1493,12 @@ class TestTabAndSplitFeatures:
         assert main_window.split_container._total_leaf_count() == 3
         main_window._split_right()
         assert main_window.split_container._total_leaf_count() == 4
-        for i in range(main_window.split_container.count()):
-            child = main_window.split_container.widget(i)
-            if isinstance(child, QSplitter):
-                for j in range(child.count()):
-                    assert isinstance(child.widget(j), EditorTabWidget)
 
-    def test_nested_pane_can_split_same_as_top_level(self, main_window, qtbot):
-        """Test that a pane inside a nested split can still split in the top-level direction (adds at top level)."""
+    def test_nested_pane_can_split_same_orientation(self, main_window, qtbot):
+        """Test that a pane inside a nested split can split in the same orientation."""
         main_window._split_down()
         assert main_window.split_container._total_leaf_count() == 2
-        result = main_window.split_container.split(Qt.Horizontal)
-        assert result is not None
+        main_window._split_down()
         assert main_window.split_container._total_leaf_count() == 3
 
     def test_repeated_split_down(self, main_window, qtbot):
@@ -1555,6 +1548,1345 @@ class TestTabAndSplitFeatures:
         pane = main_window.split_container.focus_or_open_document(doc)
         assert pane is not None
         assert pane.doc is doc
+
+
+class TestAddWorkspace:
+    """Test the Add Workspace toolbar button and add_pane functionality."""
+
+    def test_add_pane_horizontal(self, main_window, qtbot):
+        """add_pane adds a new tab widget at the end for horizontal orientation."""
+        initial_count = main_window.split_container._total_leaf_count()
+        new_tw = main_window.split_container.add_pane(Qt.Horizontal)
+        assert new_tw is not None
+        assert main_window.split_container._total_leaf_count() == initial_count + 1
+        assert main_window.split_container.active_tab_widget() is new_tw
+
+    def test_add_pane_vertical(self, main_window, qtbot):
+        """add_pane adds a new tab widget at the end for vertical orientation."""
+        initial_count = main_window.split_container._total_leaf_count()
+        new_tw = main_window.split_container.add_pane(Qt.Vertical)
+        assert new_tw is not None
+        assert main_window.split_container._total_leaf_count() == initial_count + 1
+        assert main_window.split_container.active_tab_widget() is new_tw
+
+    def test_add_pane_respects_max_limit(self, main_window, qtbot):
+        """add_pane returns None when 5 panes already exist."""
+        for _ in range(4):
+            main_window.split_container.add_pane(Qt.Horizontal)
+        assert main_window.split_container._total_leaf_count() == 5
+        result = main_window.split_container.add_pane(Qt.Horizontal)
+        assert result is None
+
+    def test_add_workspace_horizontal_method(self, main_window, qtbot):
+        """_add_workspace_horizontal adds a pane at the end."""
+        initial_count = main_window.split_container._total_leaf_count()
+        main_window._add_workspace_horizontal()
+        assert main_window.split_container._total_leaf_count() == initial_count + 1
+        all_tw = main_window.split_container._all_tab_widgets()
+        assert main_window.split_container.active_tab_widget() is all_tw[-1]
+
+    def test_add_workspace_vertical_method(self, main_window, qtbot):
+        """_add_workspace_vertical adds a pane at the end."""
+        initial_count = main_window.split_container._total_leaf_count()
+        main_window._add_workspace_vertical()
+        assert main_window.split_container._total_leaf_count() == initial_count + 1
+        all_tw = main_window.split_container._all_tab_widgets()
+        assert main_window.split_container.active_tab_widget() is all_tw[-1]
+
+    def test_add_workspace_creates_blank_doc(self, main_window, qtbot):
+        """Adding a workspace creates a new blank document in the new pane."""
+        main_window._add_workspace_horizontal()
+        pane = main_window.split_container.current_editor()
+        assert pane is not None
+        assert pane.toPlainText() == ""
+        assert pane.doc.file_path is None
+
+    def test_split_right_always_splits_active(self, main_window, qtbot):
+        """_split_right always splits adjacent to the active (blue) tab widget."""
+        initial_count = main_window.split_container._total_leaf_count()
+        main_window._split_right()
+        assert main_window.split_container._total_leaf_count() == initial_count + 1
+
+    def test_split_down_always_splits_active(self, main_window, qtbot):
+        """_split_down always splits adjacent to the active (blue) tab widget."""
+        initial_count = main_window.split_container._total_leaf_count()
+        main_window._split_down()
+        assert main_window.split_container._total_leaf_count() == initial_count + 1
+
+    def test_split_right_then_down_splits_tab_not_workspace(self, main_window, qtbot):
+        """Ctrl+\\ then Ctrl+Shift+\\ should split the active tab, not the workspace."""
+        from PyQt5.QtWidgets import QSplitter
+        main_window._split_right()
+        assert main_window.split_container._total_leaf_count() == 2
+        active_tw = main_window.split_container.active_tab_widget()
+        main_window._split_down()
+        assert main_window.split_container._total_leaf_count() == 3
+        new_active = main_window.split_container.active_tab_widget()
+        assert new_active is not active_tw
+        parent = new_active.parentWidget()
+        assert isinstance(parent, QSplitter)
+        assert parent.orientation() == Qt.Vertical
+
+    def test_add_workspace_preserves_existing_layout(self, main_window, qtbot):
+        """Adding a workspace with different orientation wraps existing, not rearranging."""
+        from PyQt5.QtWidgets import QSplitter
+        main_window._split_right()
+        assert main_window.split_container._total_leaf_count() == 2
+        assert main_window.split_container.orientation() == Qt.Horizontal
+        main_window._add_workspace_vertical()
+        assert main_window.split_container._total_leaf_count() == 3
+        assert main_window.split_container.orientation() == Qt.Vertical
+        wrapper = main_window.split_container.widget(0)
+        assert isinstance(wrapper, QSplitter)
+        assert wrapper.orientation() == Qt.Horizontal
+
+
+class TestDocumentInvalidFile:
+    """Tests for Document.is_invalid_file setter."""
+
+    def test_set_is_invalid_file(self):
+        """Test setting is_invalid_file on a Document."""
+        doc = Document()
+        assert doc.is_invalid_file is False
+        doc.is_invalid_file = True
+        assert doc.is_invalid_file is True
+
+
+class TestDocumentManagerUpdatePath:
+    """Tests for DocumentManager.update_document_path removing old path."""
+
+    def test_update_document_path_removes_old(self, tmp_path):
+        """Test that update_document_path removes old path mapping."""
+        mgr = DocumentManager()
+        old_path = str(tmp_path / "old.py")
+        new_path = str(tmp_path / "new.py")
+        doc = mgr.get_or_create_document(old_path)
+        assert mgr.get_document_by_path(old_path) is doc
+        mgr.update_document_path(doc, new_path)
+        assert mgr.get_document_by_path(old_path) is None
+        assert mgr.get_document_by_path(new_path) is doc
+
+
+class TestFindReplaceDialogExtra:
+    """Additional tests for FindReplaceDialog edge cases."""
+
+    def test_find_previous_empty_search(self, main_window, qtbot):
+        """Test find_previous with empty search text."""
+        dialog = FindReplaceDialog(main_window)
+        dialog.find_input.setText("")
+        dialog.find_previous()
+        assert "Please enter search text" in dialog.status_label.text()
+        dialog.close()
+
+    def test_find_previous_not_found(self, main_window, qtbot):
+        """Test find_previous when text is not found."""
+        main_window.editor.setPlainText("Hello World")
+        dialog = FindReplaceDialog(main_window)
+        dialog.find_input.setText("zzzzz")
+        dialog.find_previous()
+        assert "not found" in dialog.status_label.text().lower()
+        dialog.close()
+
+    def test_find_previous_case_sensitive(self, main_window, qtbot):
+        """Test find_previous with case sensitivity."""
+        main_window.editor.setPlainText("Hello hello HELLO")
+        cursor = main_window.editor.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        main_window.editor.setTextCursor(cursor)
+        dialog = FindReplaceDialog(main_window)
+        dialog.find_input.setText("hello")
+        dialog.case_sensitive_checkbox.setChecked(True)
+        dialog.find_previous()
+        cursor = main_window.editor.textCursor()
+        selected = main_window.editor.toPlainText()[cursor.selectionStart():cursor.selectionEnd()]
+        assert selected == "hello"
+        dialog.close()
+
+    def test_replace_current_no_selection(self, main_window, qtbot):
+        """Test replace_current when nothing is selected."""
+        main_window.editor.setPlainText("Hello World")
+        cursor = main_window.editor.textCursor()
+        cursor.clearSelection()
+        main_window.editor.setTextCursor(cursor)
+        dialog = FindReplaceDialog(main_window)
+        dialog.replace_input.setText("Hi")
+        dialog.replace_current()
+        assert "No text selected" in dialog.status_label.text()
+        dialog.close()
+
+    def test_replace_all_empty_search(self, main_window, qtbot):
+        """Test replace_all with empty search text."""
+        dialog = FindReplaceDialog(main_window)
+        dialog.find_input.setText("")
+        dialog.replace_all()
+        assert "Please enter search text" in dialog.status_label.text()
+        dialog.close()
+
+    def test_replace_all_case_sensitive(self, main_window, qtbot):
+        """Test replace_all with case sensitivity enabled."""
+        main_window.editor.setPlainText("Hello hello HELLO")
+        dialog = FindReplaceDialog(main_window)
+        dialog.find_input.setText("hello")
+        dialog.replace_input.setText("world")
+        dialog.case_sensitive_checkbox.setChecked(True)
+        dialog.replace_all()
+        text = main_window.editor.toPlainText()
+        assert text == "Hello world HELLO"
+        dialog.close()
+
+    def test_find_next_no_editor(self, qtbot):
+        """Test find_next with no editor."""
+        dialog = FindReplaceDialog(None)
+        dialog.editor = None
+        dialog.find_next()
+        dialog.close()
+
+    def test_find_previous_no_editor(self, qtbot):
+        """Test find_previous with no editor."""
+        dialog = FindReplaceDialog(None)
+        dialog.editor = None
+        dialog.find_previous()
+        dialog.close()
+
+    def test_replace_current_no_editor(self, qtbot):
+        """Test replace_current with no editor."""
+        dialog = FindReplaceDialog(None)
+        dialog.editor = None
+        dialog.replace_current()
+        dialog.close()
+
+    def test_replace_all_no_editor(self, qtbot):
+        """Test replace_all with no editor."""
+        dialog = FindReplaceDialog(None)
+        dialog.editor = None
+        dialog.replace_all()
+        dialog.close()
+
+
+class TestStripedOverlay:
+    """Tests for StripedOverlay widget."""
+
+    def test_striped_overlay_paint(self, qtbot):
+        """Test StripedOverlay paint event runs without error."""
+        overlay = StripedOverlay()
+        overlay.resize(200, 200)
+        overlay.repaint()
+        overlay.close()
+
+
+class TestMultiLineHighlighting:
+    """Tests for multi-line comment/string highlighting."""
+
+    def test_multiline_comment_c(self, editor, qtbot):
+        """Test multi-line comment highlighting for C language."""
+        editor.set_language("c")
+        editor.setPlainText("/* this is\na multi-line\ncomment */")
+        # Force re-highlight
+        editor.highlighter.rehighlight()
+
+    def test_multiline_comment_python(self, editor, qtbot):
+        """Test multi-line string highlighting for Python."""
+        editor.set_language("python")
+        editor.setPlainText('x = """\nmulti\nline\n"""')
+        editor.highlighter.rehighlight()
+
+    def test_multiline_comment_continued(self, editor, qtbot):
+        """Test multi-line comment that continues (no end found)."""
+        editor.set_language("javascript")
+        editor.setPlainText("/* unterminated comment")
+        editor.highlighter.rehighlight()
+
+
+class TestLightModeLineNumbers:
+    """Tests for line number painting in light mode."""
+
+    def test_paint_light_mode(self, editor, qtbot):
+        """Test line number painting in light mode."""
+        editor.set_dark_mode(False)
+        qtbot.keyClicks(editor, "Line 1")
+        qtbot.keyClick(editor, Qt.Key_Return)
+        qtbot.keyClicks(editor, "Line 2")
+        editor.line_number_area.repaint()
+
+    def test_highlight_current_line_light_mode(self, editor, qtbot):
+        """Test current line highlight in light mode with brackets."""
+        editor.set_dark_mode(False)
+        editor.setPlainText("(hello)")
+        cursor = editor.textCursor()
+        cursor.setPosition(0)
+        editor.setTextCursor(cursor)
+        editor.match_brackets()
+        assert len(editor.bracket_positions) == 2
+
+
+class TestKeyUpDownEdgeCases:
+    """Tests for Key_Up at first line and Key_Down at last line."""
+
+    def test_key_up_at_first_line(self, editor, qtbot):
+        """Test pressing up arrow at first line moves to start of line."""
+        editor.setPlainText("Hello World")
+        cursor = editor.textCursor()
+        cursor.setPosition(5)
+        editor.setTextCursor(cursor)
+        qtbot.keyClick(editor, Qt.Key_Up)
+        assert editor.textCursor().position() == 0
+
+    def test_key_down_at_last_line(self, editor, qtbot):
+        """Test pressing down arrow at last line moves to end of line."""
+        editor.setPlainText("Hello World")
+        cursor = editor.textCursor()
+        cursor.setPosition(5)
+        editor.setTextCursor(cursor)
+        qtbot.keyClick(editor, Qt.Key_Down)
+        assert editor.textCursor().position() == len("Hello World")
+
+
+class TestEditorPaneExtra:
+    """Tests for EditorPane specific functionality."""
+
+    def test_editor_pane_focus_event(self, main_window, qtbot):
+        """Test EditorPane emits pane_focused on focusInEvent."""
+        pane = main_window.editor
+        signals_received = []
+        pane.pane_focused.connect(lambda p: signals_received.append(p))
+        from PyQt5.QtGui import QFocusEvent
+        from PyQt5.QtCore import QEvent
+        pane.focusInEvent(QFocusEvent(QEvent.FocusIn))
+        assert len(signals_received) == 1
+
+    def test_editor_pane_cleanup(self, main_window, qtbot):
+        """Test EditorPane cleanup returns remaining view count."""
+        pane = main_window.editor
+        doc = pane.doc
+        initial_views = doc.view_count
+        remaining = pane.cleanup()
+        assert remaining == initial_views - 1
+        # Restore to avoid teardown issue
+        doc.add_view()
+
+
+class TestEditorTabWidgetExtra:
+    """Tests for EditorTabWidget specifics."""
+
+    def test_set_active_split_light_mode(self, main_window, qtbot):
+        """Test set_active_split with light mode."""
+        tw = main_window.split_container.active_tab_widget()
+        tw.set_active_split(True, dark_mode=False)
+        tw.set_active_split(False, dark_mode=False)
+
+    def test_find_editor_for_nonexistent_doc(self, main_window, qtbot):
+        """Test find_editor_for_document returns None for unknown doc."""
+        tw = main_window.split_container.active_tab_widget()
+        doc = Document()
+        pane, idx = tw.find_editor_for_document(doc)
+        assert pane is None
+        assert idx == -1
+
+    def test_focus_document_returns_false(self, main_window, qtbot):
+        """Test focus_document returns False for unknown doc."""
+        tw = main_window.split_container.active_tab_widget()
+        doc = Document()
+        assert tw.focus_document(doc) is False
+
+    def test_close_tab_emits_all_tabs_closed(self, main_window, qtbot):
+        """Test closing last tab in a tab widget."""
+        main_window._split_right()
+        all_tw = main_window.split_container._all_tab_widgets()
+        new_tw = all_tw[-1]
+        assert new_tw.count() > 0
+        remaining = new_tw.close_tab(0)
+        assert new_tw.count() == 0
+
+
+class TestSplitContainerExtra:
+    """Tests for SplitContainer edge cases."""
+
+    def test_on_pane_focused_switches_active(self, main_window, qtbot):
+        """Test that pane focus switches active tab widget."""
+        main_window._split_right()
+        all_tw = main_window.split_container._all_tab_widgets()
+        assert len(all_tw) == 2
+        # Focus first pane
+        first_pane = all_tw[0].current_editor()
+        from PyQt5.QtGui import QFocusEvent
+        from PyQt5.QtCore import QEvent
+        first_pane.focusInEvent(QFocusEvent(QEvent.FocusIn))
+        assert main_window.split_container.active_tab_widget() is all_tw[0]
+
+    def test_current_editor_no_active(self, qtbot):
+        """Test current_editor returns None when no active tab widget."""
+        mgr = DocumentManager()
+        sc = SplitContainer(mgr)
+        sc._active_tab_widget = None
+        assert sc.current_editor() is None
+        sc.close()
+
+    def test_open_document_in_new_split(self, main_window, qtbot):
+        """Test open_document with in_new_split=True."""
+        doc = main_window.doc_manager.get_or_create_document()
+        pane = main_window.split_container.open_document(doc, in_new_split=True)
+        assert pane is not None
+
+    def test_focus_or_open_document_disallow_new(self, main_window, qtbot):
+        """Test focus_or_open_document with allow_new_view=False for unfound doc."""
+        doc = Document()
+        result = main_window.split_container.focus_or_open_document(doc, allow_new_view=False)
+        assert result is None
+
+    def test_split_no_active(self, main_window, qtbot):
+        """Test split returns None when no active tab widget."""
+        main_window.split_container._active_tab_widget = None
+        result = main_window.split_container.split(Qt.Horizontal)
+        assert result is None
+        # Restore
+        all_tw = main_window.split_container._all_tab_widgets()
+        if all_tw:
+            main_window.split_container._active_tab_widget = all_tw[0]
+
+    def test_close_split_when_only_one(self, main_window, qtbot):
+        """Test close_split does nothing when only one split exists."""
+        assert main_window.split_container._total_leaf_count() == 1
+        main_window.split_container.close_split()
+        assert main_window.split_container._total_leaf_count() == 1
+
+    def test_select_new_active_empty(self, qtbot):
+        """Test _select_new_active when no tab widgets remain."""
+        mgr = DocumentManager()
+        sc = SplitContainer(mgr)
+        # Remove all child widgets
+        while sc.count():
+            w = sc.widget(0)
+            w.setParent(None)
+        sc._select_new_active()
+        assert sc._active_tab_widget is None
+        sc.close()
+
+    def test_on_tab_close_requested_cancel(self, main_window, qtbot):
+        """Test _on_tab_close_requested with modified doc and Cancel."""
+        tw = main_window.split_container.active_tab_widget()
+        pane = tw.current_editor()
+        pane.doc.document.setPlainText("modified")
+        pane.doc.add_view()  # Make view_count == 1 after removing initial
+        pane.doc.remove_view()
+        with patch('text_editor.QMessageBox.question', return_value=QMessageBox.Cancel):
+            main_window.split_container._on_tab_close_requested(tw, 0)
+        # Tab should still exist
+        assert tw.count() > 0
+        pane.doc.is_modified = False
+
+    def test_on_tab_close_requested_discard(self, main_window, qtbot):
+        """Test _on_tab_close_requested with modified doc and Discard."""
+        main_window._new_file()
+        tw = main_window.split_container.active_tab_widget()
+        pane = tw.current_editor()
+        pane.doc.document.setPlainText("modified")
+        initial_count = tw.count()
+        with patch('text_editor.QMessageBox.question', return_value=QMessageBox.Discard):
+            main_window.split_container._on_tab_close_requested(tw, tw.indexOf(pane))
+        assert tw.count() == initial_count - 1
+
+    def test_save_document_delegation(self, main_window, tmp_path, qtbot):
+        """Test _save_document delegates to parent TextEditor."""
+        file_path = str(tmp_path / "test_save.txt")
+        doc = main_window.editor.doc
+        main_window.doc_manager.update_document_path(doc, file_path)
+        doc.document.setPlainText("content")
+        result = main_window.split_container._save_document(doc)
+        assert result is True
+        assert os.path.exists(file_path)
+
+    def test_on_editor_changed_updates_active(self, main_window, qtbot):
+        """Test _on_editor_changed updates active tab widget."""
+        main_window._split_right()
+        all_tw = main_window.split_container._all_tab_widgets()
+        pane = all_tw[0].current_editor()
+        main_window.split_container._on_editor_changed(pane)
+
+
+class TestFileTreeViewExtra:
+    """Tests for FileTreeView edge cases."""
+
+    def test_select_file_nonexistent(self, file_tree):
+        """Test select_file with nonexistent path."""
+        file_tree.select_file("/nonexistent/path/file.txt")
+
+    def test_select_file_none(self, file_tree):
+        """Test select_file with None."""
+        file_tree.select_file(None)
+
+    def test_cleanup_explorer_invalid_index(self, file_tree, tmp_path):
+        """Test cleanup_explorer with invalid file path."""
+        file_tree.set_root_path(str(tmp_path))
+        file_tree.cleanup_explorer("/totally/fake/path.txt")
+
+
+class TestTextEditorEditActions:
+    """Tests for TextEditor edit action delegates."""
+
+    def test_undo_action(self, main_window, qtbot):
+        """Test _undo delegates to editor."""
+        qtbot.keyClicks(main_window.editor, "hello")
+        main_window._undo()
+        assert main_window.editor.toPlainText() != "hello" or main_window.editor.toPlainText() == ""
+
+    def test_redo_action(self, main_window, qtbot):
+        """Test _redo delegates to editor."""
+        qtbot.keyClicks(main_window.editor, "hello")
+        main_window._undo()
+        main_window._redo()
+
+    def test_cut_action(self, main_window, qtbot):
+        """Test _cut delegates to editor."""
+        qtbot.keyClicks(main_window.editor, "hello")
+        main_window.editor.selectAll()
+        main_window._cut()
+
+    def test_copy_action(self, main_window, qtbot):
+        """Test _copy delegates to editor."""
+        qtbot.keyClicks(main_window.editor, "hello")
+        main_window.editor.selectAll()
+        main_window._copy()
+
+    def test_paste_action(self, main_window, qtbot):
+        """Test _paste delegates to editor."""
+        main_window._paste()
+
+    def test_select_all_action(self, main_window, qtbot):
+        """Test _select_all delegates to editor."""
+        qtbot.keyClicks(main_window.editor, "hello")
+        main_window._select_all()
+        assert main_window.editor.textCursor().hasSelection()
+
+
+class TestTextEditorEdgeCases:
+    """Tests for TextEditor edge cases."""
+
+    def test_on_active_editor_changed_disconnect(self, main_window, qtbot):
+        """Test _on_active_editor_changed disconnects old pane."""
+        pane1 = main_window.editor
+        main_window._on_active_editor_changed(pane1)
+        # Now change to another
+        main_window._split_right()
+        pane2 = main_window.editor
+        main_window._on_active_editor_changed(pane2)
+        # Change to None
+        main_window._on_active_editor_changed(None)
+
+    def test_update_window_title_no_editor(self, main_window, qtbot):
+        """Test _update_window_title when no editor."""
+        main_window.split_container._active_tab_widget = None
+        main_window._update_window_title()
+        assert main_window.windowTitle() == "Text Editor"
+        # Restore
+        all_tw = main_window.split_container._all_tab_widgets()
+        if all_tw:
+            main_window.split_container._active_tab_widget = all_tw[0]
+
+    def test_split_right_empty_active(self, main_window, qtbot):
+        """Test _split_right when active tab widget is empty."""
+        main_window._split_right()
+        active_tw = main_window.split_container.active_tab_widget()
+        # Close all tabs in the new split to make it empty
+        while active_tw.count() > 0:
+            active_tw.close_tab(0)
+        main_window._split_right()
+
+    def test_split_down_empty_active(self, main_window, qtbot):
+        """Test _split_down when active tab widget is empty."""
+        main_window._split_right()
+        active_tw = main_window.split_container.active_tab_widget()
+        while active_tw.count() > 0:
+            active_tw.close_tab(0)
+        main_window._split_down()
+
+    def test_close_split_with_save_discard(self, main_window, qtbot):
+        """Test _close_split with modified document and Discard."""
+        main_window._split_right()
+        pane = main_window.editor
+        pane.doc.document.setPlainText("unsaved")
+        with patch('text_editor.QMessageBox.question', return_value=QMessageBox.Discard):
+            main_window._close_split()
+
+    def test_update_cursor_position_no_editor(self, main_window, qtbot):
+        """Test _update_cursor_position when no editor."""
+        main_window.split_container._active_tab_widget = None
+        main_window._update_cursor_position()
+        assert "Ready" in main_window.statusbar.currentMessage()
+        all_tw = main_window.split_container._all_tab_widgets()
+        if all_tw:
+            main_window.split_container._active_tab_widget = all_tw[0]
+
+    def test_open_unicode_error_file(self, main_window, tmp_path, qtbot):
+        """Test opening a file that causes UnicodeDecodeError."""
+        bad_file = tmp_path / "bad_unicode.txt"
+        bad_file.write_bytes(b'\x80\x81\x82\x83' * 200)
+        with patch.object(QMessageBox, 'warning'):
+            main_window._open_file_path(str(bad_file))
+
+    def test_open_file_general_exception(self, main_window, tmp_path, qtbot):
+        """Test opening a file that raises a general exception."""
+        file_path = str(tmp_path / "test.txt")
+        with open(file_path, 'w') as f:
+            f.write("hello")
+        with patch('builtins.open', side_effect=PermissionError("denied")):
+            with patch.object(QMessageBox, 'critical'):
+                main_window._open_file_path(file_path)
+
+    def test_binary_detection_null_bytes(self, main_window, tmp_path):
+        """Test binary detection with null bytes."""
+        null_file = tmp_path / "null.bin"
+        null_file.write_bytes(b'some text\x00with null bytes')
+        assert main_window._is_likely_binary(str(null_file)) is True
+
+    def test_save_file_invalid_doc(self, main_window, qtbot):
+        """Test _save_file when doc is invalid."""
+        main_window.editor.doc._is_invalid_file = True
+        main_window._save_file()
+        main_window.editor.doc._is_invalid_file = False
+
+    def test_save_file_as_cancelled(self, main_window, qtbot):
+        """Test _save_file_as when dialog is cancelled."""
+        with patch('text_editor.QFileDialog') as MockDialog:
+            mock_instance = MagicMock()
+            MockDialog.return_value = mock_instance
+            mock_instance.exec_.return_value = QFileDialog.Rejected
+            main_window._save_file_as()
+
+    def test_save_document_error(self, main_window, tmp_path, qtbot):
+        """Test _save_document with write error."""
+        doc = main_window.editor.doc
+        main_window.doc_manager.update_document_path(doc, "/invalid/readonly/path/file.txt")
+        with patch.object(QMessageBox, 'critical'):
+            result = main_window._save_document(doc)
+        assert result is False
+
+    def test_show_find_dialog(self, main_window, qtbot):
+        """Test _show_find_dialog creates and shows dialog."""
+        with patch('text_editor.FindReplaceDialog') as MockDialog:
+            mock_instance = MagicMock()
+            MockDialog.return_value = mock_instance
+            main_window._show_find_dialog()
+            mock_instance.exec_.assert_called_once()
+
+    def test_close_event_exception(self, main_window, qtbot):
+        """Test closeEvent handles exception gracefully."""
+        event = MagicMock()
+        with patch.object(main_window, '_check_save_all', side_effect=RuntimeError("test")):
+            main_window.closeEvent(event)
+        event.accept.assert_called_once()
+
+    def test_check_save_all_exception_in_doc(self, main_window, qtbot):
+        """Test _check_save_all handles exception accessing doc."""
+        main_window._skip_save_check = False
+        doc = main_window.editor.doc
+        # Force exception by making is_modified raise
+        with patch.object(type(doc), 'is_modified', new_callable=lambda: property(lambda s: (_ for _ in ()).throw(RuntimeError("test")))):
+            result = main_window._check_save_all()
+        assert result is True
+
+    def test_create_new_folder(self, main_window, tmp_path, qtbot):
+        """Test _create_new_folder creates a new folder."""
+        mock_dialog = MagicMock()
+        mock_dialog.directory.return_value.absolutePath.return_value = str(tmp_path)
+        with patch('text_editor.QInputDialog.getText', return_value=("new_folder", True)):
+            main_window._create_new_folder(mock_dialog)
+        assert os.path.exists(tmp_path / "new_folder")
+
+    def test_create_new_folder_cancelled(self, main_window, tmp_path, qtbot):
+        """Test _create_new_folder when cancelled."""
+        mock_dialog = MagicMock()
+        mock_dialog.directory.return_value.absolutePath.return_value = str(tmp_path)
+        with patch('text_editor.QInputDialog.getText', return_value=("", False)):
+            main_window._create_new_folder(mock_dialog)
+
+    def test_create_new_folder_error(self, main_window, tmp_path, qtbot):
+        """Test _create_new_folder with error."""
+        mock_dialog = MagicMock()
+        mock_dialog.directory.return_value.absolutePath.return_value = str(tmp_path)
+        with patch('text_editor.QInputDialog.getText', return_value=("test", True)):
+            with patch('os.makedirs', side_effect=OSError("error")):
+                with patch.object(QMessageBox, 'critical'):
+                    main_window._create_new_folder(mock_dialog)
+
+    def test_save_file_as_invalid_doc(self, main_window, qtbot):
+        """Test _save_file_as when doc is invalid."""
+        main_window.editor.doc._is_invalid_file = True
+        main_window._save_file_as()
+        main_window.editor.doc._is_invalid_file = False
+
+    def test_save_to_path_via_main_window(self, main_window, tmp_path, qtbot):
+        """Test _save_to_path backward compatibility method."""
+        file_path = str(tmp_path / "saveto.txt")
+        main_window.editor.setPlainText("content")
+        result = main_window._save_to_path(file_path)
+        assert result is True
+        with open(file_path) as f:
+            assert f.read() == "content"
+
+
+class TestSyntaxHighlighterAllLanguages:
+    """Test highlighting for multiple language types to cover all branches."""
+
+    def test_highlight_html(self, editor, qtbot):
+        """Test HTML tag and attribute highlighting."""
+        editor.set_language("html")
+        editor.setPlainText('<div class="test">Hello</div>')
+        editor.highlighter.rehighlight()
+
+    def test_highlight_css(self, editor, qtbot):
+        """Test CSS property highlighting."""
+        editor.set_language("css")
+        editor.setPlainText('body { color: red; background: blue; }')
+        editor.highlighter.rehighlight()
+
+    def test_highlight_sql(self, editor, qtbot):
+        """Test SQL keyword highlighting (case insensitive)."""
+        editor.set_language("sql")
+        editor.setPlainText("SELECT * FROM users WHERE id = 1;")
+        editor.highlighter.rehighlight()
+
+    def test_highlight_cpp_preprocessor(self, editor, qtbot):
+        """Test C++ preprocessor directive highlighting."""
+        editor.set_language("cpp")
+        editor.setPlainText('#include <iostream>\n#define MAX 100')
+        editor.highlighter.rehighlight()
+
+    def test_highlight_python_decorator(self, editor, qtbot):
+        """Test Python decorator highlighting."""
+        editor.set_language("python")
+        editor.setPlainText('@decorator\nclass MyClass:\n    pass')
+        editor.highlighter.rehighlight()
+
+    def test_highlight_xml(self, editor, qtbot):
+        """Test XML highlighting."""
+        editor.set_language("xml")
+        editor.setPlainText('<!-- comment -->\n<root attr="val">text</root>')
+        editor.highlighter.rehighlight()
+
+    def test_set_dark_mode_on_highlighter(self, editor, qtbot):
+        """Test switching highlighter to light mode."""
+        editor.set_language("python")
+        editor.highlighter.set_dark_mode(False)
+        assert editor.highlighter.dark_mode is False
+        editor.highlighter.set_dark_mode(True)
+
+
+class TestEditorResizeEvent:
+    """Test editor resize event."""
+
+    def test_resize_event(self, editor, qtbot):
+        """Test resizeEvent updates line number area."""
+        from PyQt5.QtGui import QResizeEvent
+        from PyQt5.QtCore import QSize
+        editor.resize(800, 600)
+
+
+class TestEditorPaneProperties:
+    """Test EditorPane property passthrough."""
+
+    def test_pane_current_file_setter_noop(self, main_window, qtbot):
+        """Test EditorPane.current_file setter is a no-op."""
+        pane = main_window.editor
+        pane.current_file = "/some/path"
+        assert pane.current_file != "/some/path"
+
+    def test_pane_is_modified_setter_noop(self, main_window, qtbot):
+        """Test EditorPane.is_modified setter is a no-op."""
+        pane = main_window.editor
+        pane.is_modified = True
+
+    def test_pane_is_invalid_file_setter_noop(self, main_window, qtbot):
+        """Test EditorPane.is_invalid_file setter is a no-op."""
+        pane = main_window.editor
+        pane.is_invalid_file = True
+
+    def test_pane_current_language_setter_noop(self, main_window, qtbot):
+        """Test EditorPane.current_language setter is a no-op."""
+        pane = main_window.editor
+        pane.current_language = "python"
+
+    def test_pane_on_doc_path_changed(self, main_window, qtbot):
+        """Test EditorPane._on_doc_path_changed updates language."""
+        pane = main_window.editor
+        pane._on_doc_path_changed("test.py")
+
+    def test_pane_on_doc_path_changed_empty(self, main_window, qtbot):
+        """Test EditorPane._on_doc_path_changed with empty path."""
+        pane = main_window.editor
+        pane._on_doc_path_changed("")
+
+
+class TestCheckSaveAllExtra:
+    """Extra tests for _check_save_all edge cases."""
+
+    def test_check_save_all_skip_check(self, main_window, qtbot):
+        """Test _check_save_all with skip_save_check."""
+        main_window._skip_save_check = True
+        main_window.editor.doc.document.setPlainText("modified")
+        assert main_window._check_save_all() is True
+
+    def test_check_save_all_no_doc_manager(self, main_window, qtbot):
+        """Test _check_save_all when doc_manager is None."""
+        main_window._skip_save_check = False
+        old_mgr = main_window.doc_manager
+        main_window.doc_manager = None
+        assert main_window._check_save_all() is True
+        main_window.doc_manager = old_mgr
+
+    def test_check_save_all_save_with_path(self, main_window, tmp_path, qtbot):
+        """Test _check_save_all with Save and file has path."""
+        main_window._skip_save_check = False
+        file_path = str(tmp_path / "save_check.txt")
+        doc = main_window.editor.doc
+        main_window.doc_manager.update_document_path(doc, file_path)
+        doc.document.setPlainText("modified content")
+        with patch('text_editor.QMessageBox.question', return_value=QMessageBox.Save):
+            result = main_window._check_save_all()
+        assert result is True
+        doc.is_modified = False
+
+    def test_check_save_all_save_no_path(self, main_window, qtbot):
+        """Test _check_save_all with Save but no file path triggers save_as."""
+        main_window._skip_save_check = False
+        doc = main_window.editor.doc
+        doc.document.setPlainText("modified content")
+        with patch('text_editor.QMessageBox.question', return_value=QMessageBox.Save):
+            with patch.object(main_window, '_save_file_as'):
+                result = main_window._check_save_all()
+        doc.is_modified = False
+
+
+class TestOnAllTabsClosed:
+    """Test _on_all_tabs_closed behavior."""
+
+    def test_on_all_tabs_closed_removes_split(self, main_window, qtbot):
+        """Test _on_all_tabs_closed removes the split when multiple exist."""
+        main_window._split_right()
+        assert main_window.split_container._total_leaf_count() == 2
+        active_tw = main_window.split_container.active_tab_widget()
+        # Close all tabs which triggers _on_all_tabs_closed
+        while active_tw.count() > 0:
+            active_tw.close_tab(0)
+
+
+class TestCloseCurrentTab:
+    """Test _close_current_tab behavior."""
+
+    def test_close_current_tab_with_unmodified(self, main_window, qtbot):
+        """Test closing current tab with unmodified document."""
+        main_window._new_file()
+        initial_count = main_window.split_container.active_tab_widget().count()
+        main_window._close_current_tab()
+        qtbot.wait(50)
+
+
+class TestDocumentManagerGetByPathNone:
+    """Test DocumentManager.get_document_by_path with None/empty."""
+
+    def test_get_document_by_path_none(self):
+        """Test get_document_by_path returns None for None."""
+        mgr = DocumentManager()
+        assert mgr.get_document_by_path(None) is None
+
+    def test_get_document_by_path_empty(self):
+        """Test get_document_by_path returns None for empty string."""
+        mgr = DocumentManager()
+        assert mgr.get_document_by_path("") is None
+
+
+class TestFindPreviousWithSelection:
+    """Test find_previous when cursor has selection."""
+
+    def test_find_previous_moves_to_selection_start(self, main_window, qtbot):
+        """Test find_previous moves cursor to selection start before searching."""
+        main_window.editor.setPlainText("Hello Hello Hello")
+        # First find to select second Hello
+        dialog = FindReplaceDialog(main_window)
+        dialog.find_input.setText("Hello")
+        dialog.find_next()
+        dialog.find_next()
+        # Now cursor has selection on second "Hello"
+        assert main_window.editor.textCursor().hasSelection()
+        # find_previous should go to first "Hello"
+        dialog.find_previous()
+        cursor = main_window.editor.textCursor()
+        assert cursor.hasSelection()
+        dialog.close()
+
+
+class TestCloseSplitSaveCancel:
+    """Test _close_split with Save-Cancel flow."""
+
+    def test_close_split_save_cancel(self, main_window, qtbot):
+        """Test _close_split Cancel prevents close."""
+        main_window._split_right()
+        pane = main_window.editor
+        pane.doc.document.setPlainText("unsaved changes")
+        initial_count = main_window.split_container._total_leaf_count()
+        with patch('text_editor.QMessageBox.question', return_value=QMessageBox.Cancel):
+            main_window._close_split()
+        assert main_window.split_container._total_leaf_count() == initial_count
+
+    def test_close_split_save(self, main_window, tmp_path, qtbot):
+        """Test _close_split Save saves and closes."""
+        main_window._split_right()
+        pane = main_window.editor
+        file_path = str(tmp_path / "close_save.txt")
+        main_window.doc_manager.update_document_path(pane.doc, file_path)
+        pane.doc.document.setPlainText("unsaved changes")
+        with patch('text_editor.QMessageBox.question', return_value=QMessageBox.Save):
+            main_window._close_split()
+        assert os.path.exists(file_path)
+
+
+class TestOpenDocumentInNewSplitMultiple:
+    """Test open_document with in_new_split when multiple splits exist."""
+
+    def test_open_in_new_split_switches_to_other(self, main_window, qtbot):
+        """Test open_document in_new_split switches to other split when >=2 exist."""
+        main_window._split_right()
+        all_tw = main_window.split_container._all_tab_widgets()
+        assert len(all_tw) >= 2
+        active = main_window.split_container.active_tab_widget()
+        doc = main_window.doc_manager.get_or_create_document()
+        pane = main_window.split_container.open_document(doc, in_new_split=True)
+        # Active should have switched to the other tab widget
+        new_active = main_window.split_container.active_tab_widget()
+        assert new_active is not active
+
+
+class TestCloseSplitNoneActive:
+    """Test close_split when _active_tab_widget is None."""
+
+    def test_close_split_none_active(self, main_window, qtbot):
+        """Test close_split does nothing when active is None."""
+        main_window.split_container._active_tab_widget = None
+        main_window.split_container.close_split()
+        all_tw = main_window.split_container._all_tab_widgets()
+        if all_tw:
+            main_window.split_container._active_tab_widget = all_tw[0]
+
+
+class TestOnTabCloseRequestedSave:
+    """Test _on_tab_close_requested with Save option."""
+
+    def test_tab_close_save(self, main_window, tmp_path, qtbot):
+        """Test tab close with Save saves and closes."""
+        main_window._new_file()
+        tw = main_window.split_container.active_tab_widget()
+        pane = tw.current_editor()
+        file_path = str(tmp_path / "tab_save.txt")
+        main_window.doc_manager.update_document_path(pane.doc, file_path)
+        pane.doc.document.setPlainText("modified")
+        initial_count = tw.count()
+        with patch('text_editor.QMessageBox.question', return_value=QMessageBox.Save):
+            main_window.split_container._on_tab_close_requested(tw, tw.indexOf(pane))
+        assert os.path.exists(file_path)
+
+
+class TestSaveDocumentNoPath:
+    """Test _save_document with no file path."""
+
+    def test_save_document_no_path(self, main_window, qtbot):
+        """Test _save_document returns False when doc has no path."""
+        doc = main_window.editor.doc
+        result = main_window._save_document(doc)
+        assert result is False
+
+
+class TestSaveFileNoEditor:
+    """Test _save_file and _save_to_path when no editor."""
+
+    def test_save_file_no_editor(self, main_window, qtbot):
+        """Test _save_file when no editor exists."""
+        main_window.split_container._active_tab_widget = None
+        main_window._save_file()
+        all_tw = main_window.split_container._all_tab_widgets()
+        if all_tw:
+            main_window.split_container._active_tab_widget = all_tw[0]
+
+    def test_save_to_path_no_editor(self, main_window, tmp_path, qtbot):
+        """Test _save_to_path when no editor exists."""
+        main_window.split_container._active_tab_widget = None
+        result = main_window._save_to_path(str(tmp_path / "test.txt"))
+        assert result is False
+        all_tw = main_window.split_container._all_tab_widgets()
+        if all_tw:
+            main_window.split_container._active_tab_widget = all_tw[0]
+
+    def test_save_file_as_no_editor(self, main_window, qtbot):
+        """Test _save_file_as when no editor exists."""
+        main_window.split_container._active_tab_widget = None
+        main_window._save_file_as()
+        all_tw = main_window.split_container._all_tab_widgets()
+        if all_tw:
+            main_window.split_container._active_tab_widget = all_tw[0]
+
+
+class TestSaveFileAsAccepted:
+    """Test _save_file_as with accepted dialog."""
+
+    def test_save_file_as_accepted(self, main_window, tmp_path, qtbot):
+        """Test _save_file_as saves when dialog accepted."""
+        file_path = str(tmp_path / "saveas.txt")
+        main_window.editor.setPlainText("content to save")
+        with patch('text_editor.QFileDialog') as MockDialog:
+            mock_instance = MagicMock()
+            MockDialog.return_value = mock_instance
+            MockDialog.AcceptSave = QFileDialog.AcceptSave
+            MockDialog.ShowDirsOnly = QFileDialog.ShowDirsOnly
+            MockDialog.DontUseNativeDialog = QFileDialog.DontUseNativeDialog
+            MockDialog.Accepted = QFileDialog.Accepted
+            mock_instance.exec_.return_value = QFileDialog.Accepted
+            mock_instance.selectedFiles.return_value = [file_path]
+            main_window._save_file_as()
+        assert os.path.exists(file_path)
+
+
+class TestOpenFileException:
+    """Test _open_file_path with general exception in the try block."""
+
+    def test_open_file_exception_in_setup(self, main_window, tmp_path, qtbot):
+        """Test exception during document setup."""
+        text_file = tmp_path / "test.txt"
+        text_file.write_text("hello")
+        with patch.object(main_window.doc_manager, 'get_or_create_document', side_effect=Exception("test")):
+            with patch.object(QMessageBox, 'critical'):
+                main_window._open_file_path(str(text_file))
+
+
+class TestSplitRightDownEmptyActive:
+    """Test _split_right/_split_down when active tab count is 0."""
+
+    def test_split_right_creates_file_in_empty(self, main_window, qtbot):
+        """Test _split_right creates new file when active tab is empty."""
+        # First get to a state where active tab widget has 0 tabs
+        tw = main_window.split_container.active_tab_widget()
+        while tw.count() > 0:
+            tw.close_tab(0)
+        assert tw.count() == 0
+        main_window._split_right()
+        assert tw.count() > 0
+
+    def test_split_down_creates_file_in_empty(self, main_window, qtbot):
+        """Test _split_down creates new file when active tab is empty."""
+        tw = main_window.split_container.active_tab_widget()
+        while tw.count() > 0:
+            tw.close_tab(0)
+        assert tw.count() == 0
+        main_window._split_down()
+        assert tw.count() > 0
+
+
+class TestCloseTabInvalid:
+    """Test EditorTabWidget.close_tab with invalid index."""
+
+    def test_close_tab_none_widget(self, main_window, qtbot):
+        """Test close_tab returns 0 when widget is None."""
+        tw = main_window.split_container.active_tab_widget()
+        result = tw.close_tab(999)
+        assert result == 0
+
+
+class TestCheckSaveAllDocManagerException:
+    """Test _check_save_all exception in documents access."""
+
+    def test_check_save_all_documents_exception(self, main_window, qtbot):
+        """Test _check_save_all handles RuntimeError in documents list."""
+        main_window._skip_save_check = False
+        with patch.object(type(main_window.doc_manager), 'documents', new_callable=lambda: property(lambda s: (_ for _ in ()).throw(RuntimeError("test")))):
+            result = main_window._check_save_all()
+        assert result is True
+
+    def test_check_save_all_outer_exception(self, main_window, qtbot):
+        """Test _check_save_all handles exception wrapping entire block."""
+        main_window._skip_save_check = False
+        with patch.object(main_window, 'doc_manager', new_callable=lambda: property(lambda s: (_ for _ in ()).throw(RuntimeError("test")))):
+            result = main_window._check_save_all()
+        assert result is True
+
+
+class TestOnActiveEditorChangedDisconnectException:
+    """Test disconnect exception in _on_active_editor_changed."""
+
+    def test_disconnect_exception_handled(self, main_window, qtbot):
+        """Test _on_active_editor_changed handles disconnect exception."""
+        pane = main_window.editor
+        main_window._on_active_editor_changed(pane)
+        # Force the connected pane to be something that will raise on disconnect
+        main_window._cursor_connected_pane = MagicMock()
+        main_window._cursor_connected_pane.cursorPositionChanged.disconnect.side_effect = TypeError("not connected")
+        main_window._on_active_editor_changed(pane)
+
+
+class TestSelectFileValid:
+    """Test FileTreeView.select_file with a valid file."""
+
+    def test_select_file_valid(self, file_tree, temp_file):
+        """Test select_file with valid existing file."""
+        dir_path = os.path.dirname(temp_file)
+        file_tree.set_root_path(dir_path)
+        file_tree.select_file(temp_file)
+
+
+class TestCleanupExplorerCollapsesNonAncestors:
+    """Test cleanup_explorer properly collapses directories."""
+
+    def test_cleanup_explorer_with_nested_dir(self, file_tree, tmp_path):
+        """Test cleanup_explorer with nested directory structure."""
+        # Create nested structure
+        subdir = tmp_path / "subdir"
+        subdir.mkdir()
+        sub_subdir = subdir / "nested"
+        sub_subdir.mkdir()
+        test_file = sub_subdir / "test.txt"
+        test_file.write_text("test")
+        file_tree.set_root_path(str(tmp_path))
+        file_tree.cleanup_explorer(str(test_file))
+
+
+class TestStripedOverlayPaintEvent:
+    """Test StripedOverlay.paintEvent actually paints stripes and text (lines 386-418)."""
+
+    def test_paint_event_draws_stripes_and_text(self, qtbot):
+        """Test that paintEvent executes all drawing code."""
+        overlay = StripedOverlay()
+        overlay.resize(300, 300)
+        overlay.show()
+        qtbot.waitExposed(overlay)
+        # Grab the widget as a pixmap — forces full paintEvent execution
+        pixmap = overlay.grab()
+        assert not pixmap.isNull()
+        assert pixmap.width() > 0
+        assert pixmap.height() > 0
+        overlay.close()
+
+
+class TestLightModeLineNumberPaint:
+    """Test light mode branch in line_number_area_paint_event (lines 1152-1153)."""
+
+    def test_light_mode_line_numbers_painted(self, editor, qtbot):
+        """Test that line numbers paint correctly in light mode."""
+        editor.set_dark_mode(False)
+        editor.setPlainText("line1\nline2\nline3")
+        editor.show()
+        qtbot.waitExposed(editor)
+        pixmap = editor.line_number_area.grab()
+        assert not pixmap.isNull()
+        editor.close()
+
+
+class TestCloseTabDisconnectException:
+    """Test close_tab handles disconnect TypeError/RuntimeError (lines 1621-1622)."""
+
+    def test_close_tab_disconnect_exception(self, main_window, qtbot):
+        """Test close_tab gracefully handles disconnect failure."""
+        main_window._new_file()
+        tw = main_window.split_container.active_tab_widget()
+        pane = tw.widget(tw.count() - 1)
+        # Inject a fake _doc_connections entry that will raise on disconnect
+        mock_doc = MagicMock()
+        mock_doc.modified_changed.disconnect.side_effect = TypeError("not connected")
+        pane._doc_connections = [(mock_doc, 'modified_changed', lambda: None)]
+        tw.close_tab(tw.count() - 1)
+
+
+class TestOpenDocumentNoActiveTabWidget:
+    """Test open_document returns None when _active_tab_widget is None (line 1729)."""
+
+    def test_open_document_returns_none(self, main_window, qtbot):
+        """Test open_document returns None with no active tab widget."""
+        sc = main_window.split_container
+        sc._active_tab_widget = None
+        doc = Document()
+        result = sc.open_document(doc)
+        assert result is None
+
+
+class TestFocusOrOpenDocumentFallback:
+    """Test focus_or_open_document falls through to open_document (line 1742)."""
+
+    def test_focus_or_open_unfocused_doc(self, main_window, qtbot):
+        """Test focus_or_open_document opens a doc that's not in any tab."""
+        doc = Document()
+        doc.document.setPlainText("new content")
+        result = main_window.split_container.focus_or_open_document(doc)
+        assert result is not None
+
+
+class TestCollapseSingleChildSplittersBreak:
+    """Test _collapse_single_child_splitters break when parent is not QSplitter (line 1917)."""
+
+    def test_collapse_stops_at_non_splitter_parent(self, main_window, qtbot):
+        """Test collapse stops when parent widget is not a QSplitter."""
+        from PyQt5.QtWidgets import QSplitter, QWidget
+        sc = main_window.split_container
+        # Create a single-child QSplitter whose parent is a plain QWidget (not QSplitter)
+        container = QWidget()
+        inner_splitter = QSplitter()
+        inner_splitter.setParent(container)
+        dummy = QWidget()
+        inner_splitter.addWidget(dummy)
+        # _collapse_single_child_splitters should hit the break on line 1917
+        sc._collapse_single_child_splitters(inner_splitter)
+        container.close()
+
+
+class TestSplitContainerSaveDocumentNoParent:
+    """Test SplitContainer._save_document returns False without QMainWindow parent (line 1961)."""
+
+    def test_save_document_no_main_window(self, qtbot):
+        """Test _save_document returns False when there's no QMainWindow ancestor."""
+        doc_mgr = DocumentManager()
+        sc = SplitContainer(doc_mgr)
+        doc = doc_mgr.get_or_create_document()
+        doc.document.setPlainText("test")
+        result = sc._save_document(doc)
+        assert result is False
+        sc.close()
+
+
+class TestSelectFileInvalidIndex:
+    """Test select_file returns early when model index is invalid (line 2020)."""
+
+    def test_select_file_invalid_model_index(self, file_tree, tmp_path):
+        """Test select_file with a file that exists but whose model index is invalid."""
+        test_file = tmp_path / "real.txt"
+        test_file.write_text("content")
+        file_tree.set_root_path(str(tmp_path))
+        from PyQt5.QtCore import QModelIndex
+        with patch.object(file_tree.model, 'index', return_value=QModelIndex()):
+            file_tree.select_file(str(test_file))
+
+
+class TestCleanupExplorerInvalidIndex:
+    """Test cleanup_explorer collapseAll on invalid index (lines 2040-2041)."""
+
+    def test_cleanup_explorer_invalid_path(self, file_tree, tmp_path):
+        """Test cleanup_explorer with path that exists but has invalid model index."""
+        file_tree.set_root_path(str(tmp_path))
+        # Path exists on disk but isn't under the model root, so index is invalid
+        other_dir = tmp_path / "other"
+        other_dir.mkdir()
+        test_file = other_dir / "test.txt"
+        test_file.write_text("test")
+        with patch.object(file_tree.model, 'index', return_value=file_tree.model.index(-1, -1)):
+            file_tree.cleanup_explorer(str(test_file))
+
+
+class TestCollapseNonAncestorsInvalidChild:
+    """Test _collapse_non_ancestors continue on invalid child_index (line 2059)."""
+
+    def test_collapse_non_ancestors_invalid_child(self, file_tree, tmp_path):
+        """Test _collapse_non_ancestors handles invalid child indices."""
+        file_tree.set_root_path(str(tmp_path))
+        # Create a mock that returns invalid indices
+        from PyQt5.QtCore import QModelIndex
+        root = file_tree.rootIndex()
+        original_index = file_tree.model.index
+        call_count = [0]
+
+        def fake_index(row, col, parent=QModelIndex()):
+            call_count[0] += 1
+            if call_count[0] <= 2:
+                return QModelIndex()  # invalid
+            return original_index(row, col, parent)
+
+        with patch.object(file_tree.model, 'rowCount', return_value=2):
+            with patch.object(file_tree.model, 'index', side_effect=fake_index):
+                file_tree._collapse_non_ancestors(root, set())
+
+
+class TestOpenFileGenericException:
+    """Test _open_file handles generic Exception (lines 2759-2761)."""
+
+    def test_open_file_generic_exception(self, main_window, tmp_path, qtbot):
+        """Test _open_file_path handles unexpected exception by showing invalid file."""
+        test_file = tmp_path / "broken.txt"
+        test_file.write_text("content")
+        with patch('builtins.open', side_effect=ValueError("unexpected")):
+            with patch.object(main_window, '_handle_invalid_file') as mock_handle:
+                main_window._open_file_path(str(test_file))
+                mock_handle.assert_called_once_with(str(test_file))
+
+
+class TestCheckSaveAllNoneDoc:
+    """Test _check_save_all skips None doc (line 2876)."""
+
+    def test_check_save_all_none_doc_in_list(self, main_window, qtbot):
+        """Test _check_save_all skips None entries in documents list."""
+        main_window._skip_save_check = False
+        with patch.object(type(main_window.doc_manager), 'documents',
+                          new_callable=lambda: property(lambda self: [None])):
+            result = main_window._check_save_all()
+        assert result is True
+
+
+class TestCheckSaveAllSaveFailsWithPath:
+    """Test _check_save_all returns False when save fails (line 2892)."""
+
+    def test_check_save_all_save_fails(self, main_window, tmp_path, qtbot):
+        """Test _check_save_all returns False when _save_document returns False."""
+        main_window._skip_save_check = False
+        doc = main_window.editor.doc
+        doc.document.setPlainText("modified")
+        main_window.doc_manager.update_document_path(doc, str(tmp_path / "fail.txt"))
+        with patch('text_editor.QMessageBox.question', return_value=QMessageBox.Save):
+            with patch.object(main_window, '_save_document', return_value=False):
+                result = main_window._check_save_all()
+        assert result is False
+        doc.is_modified = False
+
+
+class TestCheckSaveAllSaveAsStillModified:
+    """Test _check_save_all returns False when save-as leaves doc modified (lines 2899-2904)."""
+
+    def test_check_save_all_save_as_still_modified(self, main_window, qtbot):
+        """Test _check_save_all returns False when save-as doesn't clear modified flag."""
+        main_window._skip_save_check = False
+        doc = main_window.editor.doc
+        doc.document.setPlainText("modified content")
+        # doc has no file_path, so it triggers save-as branch
+        with patch('text_editor.QMessageBox.question', return_value=QMessageBox.Save):
+            with patch.object(main_window, '_save_file_as'):
+                # After save_as, doc is still modified
+                result = main_window._check_save_all()
+        assert result is False
+        doc.is_modified = False
+
+    def test_check_save_all_save_as_is_modified_raises(self, main_window, qtbot):
+        """Test _check_save_all handles exception checking is_modified after save-as (lines 2899-2900)."""
+        main_window._skip_save_check = False
+        doc = main_window.editor.doc
+        doc.document.setPlainText("content")
+        call_count = [0]
+        original_is_modified = type(doc).is_modified.fget
+
+        def flaky_is_modified(self_doc):
+            call_count[0] += 1
+            if call_count[0] >= 3:
+                raise RuntimeError("deleted")
+            return original_is_modified(self_doc)
+
+        with patch('text_editor.QMessageBox.question', return_value=QMessageBox.Save):
+            with patch.object(main_window, '_save_file_as'):
+                with patch.object(type(doc), 'is_modified',
+                                  new_callable=lambda: property(flaky_is_modified)):
+                    result = main_window._check_save_all()
+        assert result is True
+
+    def test_check_save_all_doc_iteration_exception(self, main_window, qtbot):
+        """Test _check_save_all handles exception during doc iteration (lines 2901-2902)."""
+        main_window._skip_save_check = False
+        # Create a doc that passes is_modified check but raises on display_name access
+        bad_doc = MagicMock()
+        type(bad_doc).is_modified = property(lambda s: True)
+        type(bad_doc).display_name = property(lambda s: (_ for _ in ()).throw(RuntimeError("dead")))
+        with patch.object(type(main_window.doc_manager), 'documents',
+                          new_callable=lambda: property(lambda self: [bad_doc])):
+            result = main_window._check_save_all()
+        assert result is True
+
 
 
 if __name__ == "__main__":
