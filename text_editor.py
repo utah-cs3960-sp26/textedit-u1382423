@@ -11,15 +11,160 @@ from PyQt5.QtWidgets import (
     QHBoxLayout, QTreeView, QSplitter, QFileDialog, QMessageBox,
     QAction, QMenuBar, QToolBar, QStatusBar, QFileSystemModel,
     QInputDialog, QShortcut, QTextEdit, QLabel, QDialog, QPushButton,
-    QLineEdit, QCheckBox
+    QLineEdit, QCheckBox, QTabWidget, QTabBar
 )
-from PyQt5.QtCore import Qt, QDir, QModelIndex, QRect
+from PyQt5.QtCore import Qt, QDir, QModelIndex, QRect, pyqtSignal, QObject
 from PyQt5.QtGui import (
     QFont, QColor, QPainter, QTextFormat, QKeySequence,
-    QTextCursor, QTextCharFormat, QBrush, QPen, QSyntaxHighlighter
+    QTextCursor, QTextCharFormat, QBrush, QPen, QSyntaxHighlighter,
+    QTextDocument
 )
-from PyQt5.QtGui import QTextDocument
+from PyQt5.QtWidgets import QPlainTextDocumentLayout
 import re
+
+
+class Document(QObject):
+    """Represents an open document with shared state across multiple editor views."""
+    
+    modified_changed = pyqtSignal(bool)
+    file_path_changed = pyqtSignal(str)
+    
+    def __init__(self, file_path=None, parent=None):
+        super().__init__(parent)
+        self._file_path = file_path
+        self._document = QTextDocument()
+        self._document.setDocumentLayout(QPlainTextDocumentLayout(self._document))
+        self._language = None
+        self._is_invalid_file = False
+        self._view_count = 0
+        
+        self._document.modificationChanged.connect(self._on_modification_changed)
+        
+        if file_path:
+            self._language = get_language_for_file(file_path)
+    
+    @property
+    def file_path(self):
+        return self._file_path
+    
+    @file_path.setter
+    def file_path(self, value):
+        self._file_path = value
+        if value:
+            self._language = get_language_for_file(value)
+        self.file_path_changed.emit(value or "")
+    
+    @property
+    def document(self):
+        return self._document
+    
+    @property
+    def language(self):
+        return self._language
+    
+    @language.setter
+    def language(self, value):
+        self._language = value
+    
+    @property
+    def is_modified(self):
+        return self._document.isModified()
+    
+    @is_modified.setter
+    def is_modified(self, value):
+        self._document.setModified(value)
+    
+    @property
+    def is_invalid_file(self):
+        return self._is_invalid_file
+    
+    @is_invalid_file.setter
+    def is_invalid_file(self, value):
+        self._is_invalid_file = value
+    
+    @property
+    def display_name(self):
+        if self._file_path:
+            name = os.path.basename(self._file_path)
+        else:
+            name = "Untitled"
+        if self.is_modified:
+            name += " *"
+        return name
+    
+    def add_view(self):
+        self._view_count += 1
+    
+    def remove_view(self):
+        self._view_count -= 1
+        return self._view_count
+    
+    @property
+    def view_count(self):
+        return self._view_count
+    
+    def _on_modification_changed(self, modified):
+        self.modified_changed.emit(modified)
+
+
+class DocumentManager(QObject):
+    """Manages all open documents and provides lookup by file path."""
+    
+    document_opened = pyqtSignal(object)
+    document_closed = pyqtSignal(object)
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._documents = []
+        self._path_to_document = {}
+    
+    def get_document_by_path(self, file_path):
+        if not file_path:
+            return None
+        normalized = os.path.normpath(os.path.abspath(file_path))
+        return self._path_to_document.get(normalized)
+    
+    def get_or_create_document(self, file_path=None):
+        if file_path:
+            existing = self.get_document_by_path(file_path)
+            if existing:
+                return existing
+        
+        doc = Document(file_path)
+        self._documents.append(doc)
+        if file_path:
+            normalized = os.path.normpath(os.path.abspath(file_path))
+            self._path_to_document[normalized] = doc
+        self.document_opened.emit(doc)
+        return doc
+    
+    def update_document_path(self, doc, new_path):
+        old_path = doc.file_path
+        if old_path:
+            old_normalized = os.path.normpath(os.path.abspath(old_path))
+            if old_normalized in self._path_to_document:
+                del self._path_to_document[old_normalized]
+        
+        doc.file_path = new_path
+        if new_path:
+            new_normalized = os.path.normpath(os.path.abspath(new_path))
+            self._path_to_document[new_normalized] = doc
+    
+    def close_document(self, doc):
+        if doc in self._documents:
+            self._documents.remove(doc)
+            if doc.file_path:
+                normalized = os.path.normpath(os.path.abspath(doc.file_path))
+                if normalized in self._path_to_document:
+                    del self._path_to_document[normalized]
+            self.document_closed.emit(doc)
+    
+    @property
+    def documents(self):
+        return list(self._documents)
+    
+    def has_unsaved_documents(self):
+        return any(doc.is_modified for doc in self._documents)
 
 
 class FindReplaceDialog(QDialog):
@@ -1266,6 +1411,509 @@ class CodeEditor(QPlainTextEdit):
         cursor.endEditBlock()
 
 
+class EditorPane(CodeEditor):
+    """A CodeEditor view bound to a Document. Multiple panes can share the same Document."""
+    
+    close_requested = pyqtSignal(object)
+    pane_focused = pyqtSignal(object)
+    
+    def __init__(self, doc, dark_mode=True, parent=None):
+        self._doc = doc
+        super().__init__(parent)
+        doc.add_view()
+        
+        self.setDocument(doc.document)
+        
+        self.highlighter = SyntaxHighlighter(doc.document, doc.language, dark_mode)
+        self.set_dark_mode(dark_mode)
+        
+        doc.modified_changed.connect(self._on_doc_modified)
+        doc.file_path_changed.connect(self._on_doc_path_changed)
+    
+    def focusInEvent(self, event):
+        """Emit signal when pane receives focus."""
+        super().focusInEvent(event)
+        self.pane_focused.emit(self)
+    
+    @property
+    def doc(self):
+        return self._doc
+    
+    @property
+    def current_file(self):
+        return self._doc.file_path if self._doc else None
+    
+    @current_file.setter
+    def current_file(self, value):
+        pass
+    
+    @property
+    def is_modified(self):
+        return self._doc.is_modified if self._doc else False
+    
+    @is_modified.setter
+    def is_modified(self, value):
+        pass
+    
+    @property
+    def is_invalid_file(self):
+        return self._doc.is_invalid_file if self._doc else False
+    
+    @is_invalid_file.setter
+    def is_invalid_file(self, value):
+        pass
+    
+    @property
+    def current_language(self):
+        return self._doc.language if self._doc else None
+    
+    @current_language.setter
+    def current_language(self, value):
+        pass
+    
+    def set_language(self, language):
+        self._doc.language = language
+        if self.highlighter:
+            self.highlighter.set_language(language)
+    
+    def set_language_from_file(self, file_path):
+        language = get_language_for_file(file_path)
+        self.set_language(language)
+    
+    def _on_doc_modified(self, modified):
+        pass
+    
+    def _on_doc_path_changed(self, path):
+        if path:
+            self.set_language_from_file(path)
+    
+    def cleanup(self):
+        remaining = self._doc.remove_view()
+        return remaining
+
+
+class EditorTabWidget(QTabWidget):
+    """Tab widget for managing multiple editor panes."""
+    
+    tab_close_requested = pyqtSignal(object, int)
+    current_editor_changed = pyqtSignal(object)
+    all_tabs_closed = pyqtSignal(object)
+    pane_focused = pyqtSignal(object, object)
+    
+    def __init__(self, doc_manager, dark_mode=True, parent=None):
+        super().__init__(parent)
+        self.doc_manager = doc_manager
+        self._is_active_split = False
+        self._dark_mode = dark_mode
+        
+        self.setTabsClosable(True)
+        self.setMovable(True)
+        self.setDocumentMode(False)
+        
+        self.tabCloseRequested.connect(self._on_tab_close_requested)
+        self.currentChanged.connect(self._on_current_changed)
+    
+    def set_dark_mode(self, dark_mode):
+        """Update dark mode for this tab widget and all its panes."""
+        self._dark_mode = dark_mode
+        for i in range(self.count()):
+            pane = self.widget(i)
+            if pane and hasattr(pane, 'set_dark_mode'):
+                pane.set_dark_mode(dark_mode)
+    
+    def set_active_split(self, is_active, dark_mode=True):
+        """Set whether this tab widget is the active split."""
+        self._is_active_split = is_active
+        if is_active:
+            if dark_mode:
+                self.setStyleSheet("""
+                    QTabWidget::pane {
+                        border: 2px solid #007acc;
+                        background: #1e1e1e;
+                    }
+                    QTabBar::tab:selected {
+                        background: #007acc;
+                        color: white;
+                    }
+                """)
+            else:
+                self.setStyleSheet("""
+                    QTabWidget::pane {
+                        border: 2px solid #0078d4;
+                        background: #ffffff;
+                    }
+                    QTabBar::tab:selected {
+                        background: #0078d4;
+                        color: white;
+                    }
+                """)
+        else:
+            if dark_mode:
+                self.setStyleSheet("""
+                    QTabWidget::pane {
+                        border: 1px solid #3c3c3c;
+                        background: #1e1e1e;
+                    }
+                """)
+            else:
+                self.setStyleSheet("""
+                    QTabWidget::pane {
+                        border: 1px solid #c0c0c0;
+                        background: #ffffff;
+                    }
+                """)
+    
+    def add_editor_for_document(self, doc):
+        pane = EditorPane(doc, dark_mode=self._dark_mode, parent=self)
+        index = self.addTab(pane, doc.display_name)
+        self.setCurrentIndex(index)
+        
+        mod_handler = lambda m: self._update_tab_title(pane)
+        path_handler = lambda p: self._update_tab_title(pane)
+        doc.modified_changed.connect(mod_handler)
+        doc.file_path_changed.connect(path_handler)
+        pane._doc_connections = [(doc, 'modified_changed', mod_handler),
+                                 (doc, 'file_path_changed', path_handler)]
+        pane.pane_focused.connect(self._on_pane_focused)
+        
+        return pane
+    
+    def _on_pane_focused(self, pane):
+        """Handle when a pane in this tab widget receives focus."""
+        self.pane_focused.emit(self, pane)
+    
+    def _update_tab_title(self, pane):
+        index = self.indexOf(pane)
+        if index >= 0:
+            self.setTabText(index, pane.doc.display_name)
+    
+    def current_editor(self):
+        return self.currentWidget()
+    
+    def find_editor_for_document(self, doc):
+        for i in range(self.count()):
+            pane = self.widget(i)
+            if pane and pane.doc is doc:
+                return pane, i
+        return None, -1
+    
+    def focus_document(self, doc):
+        pane, index = self.find_editor_for_document(doc)
+        if pane:
+            self.setCurrentIndex(index)
+            return True
+        return False
+    
+    def _on_tab_close_requested(self, index):
+        self.tab_close_requested.emit(self, index)
+    
+    def _on_current_changed(self, index):
+        if index >= 0:
+            pane = self.widget(index)
+            self.current_editor_changed.emit(pane)
+    
+    def close_tab(self, index):
+        pane = self.widget(index)
+        if pane:
+            for doc, signal_name, handler in getattr(pane, '_doc_connections', []):
+                try:
+                    getattr(doc, signal_name).disconnect(handler)
+                except (TypeError, RuntimeError):
+                    pass
+            remaining_views = pane.cleanup()
+            self.removeTab(index)
+            pane.deleteLater()
+            
+            if self.count() == 0:
+                self.all_tabs_closed.emit(self)
+            
+            return remaining_views
+        return 0
+
+
+class SplitContainer(QSplitter):
+    """Container that manages horizontal/vertical splits of tab widgets.
+    
+    Supports one level of nesting: top-level children can be EditorTabWidget
+    (leaf) or QSplitter (nested) whose children are EditorTabWidget leaves.
+    """
+    
+    active_editor_changed = pyqtSignal(object)
+    
+    def __init__(self, doc_manager, orientation=Qt.Horizontal, parent=None):
+        super().__init__(orientation, parent)
+        self.doc_manager = doc_manager
+        self._active_tab_widget = None
+        self._dark_mode = True
+        
+        first_tabs = self._create_tab_widget()
+        self.addWidget(first_tabs)
+        self._active_tab_widget = first_tabs
+        self._update_active_indicators()
+    
+    def _all_tab_widgets(self):
+        """Return all EditorTabWidget leaves, including those inside nested splitters."""
+        out = []
+        for i in range(self.count()):
+            child = self.widget(i)
+            if isinstance(child, EditorTabWidget):
+                out.append(child)
+            elif isinstance(child, QSplitter):
+                for j in range(child.count()):
+                    w = child.widget(j)
+                    if isinstance(w, EditorTabWidget):
+                        out.append(w)
+        return out
+    
+    def _create_tab_widget(self):
+        """Create a new EditorTabWidget with all signals connected."""
+        tab_widget = EditorTabWidget(self.doc_manager, dark_mode=self._dark_mode)
+        tab_widget.tab_close_requested.connect(self._on_tab_close_requested)
+        tab_widget.current_editor_changed.connect(self._on_editor_changed)
+        tab_widget.all_tabs_closed.connect(self._on_all_tabs_closed)
+        tab_widget.pane_focused.connect(self._on_pane_focused)
+        return tab_widget
+    
+    def _on_pane_focused(self, tab_widget, pane):
+        """Handle when a pane receives focus - update active split."""
+        if tab_widget in self._all_tab_widgets() and self._active_tab_widget is not tab_widget:
+            self._active_tab_widget = tab_widget
+            self._update_active_indicators()
+            self.active_editor_changed.emit(pane)
+    
+    def _update_active_indicators(self):
+        """Update the visual indicator showing which split is active."""
+        for tw in self._all_tab_widgets():
+            tw.set_active_split(tw is self._active_tab_widget, self._dark_mode)
+    
+    def set_dark_mode(self, dark_mode):
+        """Update dark mode setting and refresh indicators."""
+        self._dark_mode = dark_mode
+        for tw in self._all_tab_widgets():
+            tw.set_dark_mode(dark_mode)
+        self._update_active_indicators()
+    
+    def active_tab_widget(self):
+        return self._active_tab_widget
+    
+    def set_active_tab_widget(self, tab_widget):
+        if tab_widget in self._all_tab_widgets():
+            self._active_tab_widget = tab_widget
+            self._update_active_indicators()
+    
+    def current_editor(self):
+        if self._active_tab_widget is not None:
+            return self._active_tab_widget.current_editor()
+        return None
+    
+    def _total_leaf_count(self):
+        return len(self._all_tab_widgets())
+    
+    def open_document(self, doc, in_new_split=False):
+        if in_new_split and self._active_tab_widget is not None:
+            all_tw = self._all_tab_widgets()
+            if len(all_tw) < 2:
+                new_tabs = self._create_tab_widget()
+                self.addWidget(new_tabs)
+                self._active_tab_widget = new_tabs
+            else:
+                for tw in all_tw:
+                    if tw is not self._active_tab_widget:
+                        self._active_tab_widget = tw
+                        break
+        
+        if self._active_tab_widget is not None:
+            pane = self._active_tab_widget.add_editor_for_document(doc)
+            return pane
+        return None
+    
+    def focus_or_open_document(self, doc, allow_new_view=True):
+        for tw in self._all_tab_widgets():
+            if tw.focus_document(doc):
+                self._active_tab_widget = tw
+                self._update_active_indicators()
+                pane = tw.current_editor()
+                if pane:
+                    pane.setFocus()
+                return pane
+        
+        if allow_new_view:
+            return self.open_document(doc)
+        return None
+    
+    def split(self, orientation):
+        if self._total_leaf_count() >= 5:
+            return None
+        
+        leaf = self._active_tab_widget
+        if leaf is None:
+            return None
+        
+        parent = leaf.parentWidget()
+        
+        if orientation == self.orientation():
+            new_tabs = self._create_tab_widget()
+            if isinstance(parent, QSplitter) and parent is not self:
+                insert_at = self.indexOf(parent) + 1
+            else:
+                insert_at = self.indexOf(leaf) + 1
+            self.insertWidget(insert_at, new_tabs)
+            
+            num_splits = self.count()
+            total_size = self.width() if orientation == Qt.Horizontal else self.height()
+            equal_size = total_size // max(num_splits, 1)
+            self.setSizes([equal_size] * num_splits)
+            
+            self._active_tab_widget = new_tabs
+            self._update_active_indicators()
+            return new_tabs
+        else:
+            if isinstance(parent, QSplitter) and parent is not self:
+                if parent.orientation() == orientation:
+                    new_tabs = self._create_tab_widget()
+                    insert_at = parent.indexOf(leaf) + 1
+                    parent.insertWidget(insert_at, new_tabs)
+                    
+                    num = parent.count()
+                    total_size = parent.height() if orientation == Qt.Vertical else parent.width()
+                    equal_size = max(total_size // num, 50)
+                    parent.setSizes([equal_size] * num)
+                    
+                    self._active_tab_widget = new_tabs
+                    self._update_active_indicators()
+                    return new_tabs
+                # Orientation mismatch would require 2-deep nesting; block it
+                return None
+            
+            idx = self.indexOf(leaf)
+            nested = QSplitter(orientation)
+            nested.setChildrenCollapsible(False)
+            
+            self.replaceWidget(idx, nested)
+            nested.addWidget(leaf)
+            new_tabs = self._create_tab_widget()
+            nested.addWidget(new_tabs)
+            
+            total_size = nested.height() if orientation == Qt.Vertical else nested.width()
+            half = max(total_size // 2, 100)
+            nested.setSizes([half, half])
+            
+            self._active_tab_widget = new_tabs
+            self._update_active_indicators()
+            return new_tabs
+    
+    def _close_all_tabs_in_widget(self, tab_widget):
+        """Close all tabs in a tab widget, running proper cleanup for each pane."""
+        for i in range(tab_widget.count() - 1, -1, -1):
+            pane = tab_widget.widget(i)
+            remaining = tab_widget.close_tab(i)
+            if remaining == 0 and pane:
+                self.doc_manager.close_document(pane.doc)
+    
+    def _remove_tab_widget(self, tab_widget):
+        """Close all tabs, detach, and schedule a tab widget for deletion."""
+        tab_widget.all_tabs_closed.disconnect(self._on_all_tabs_closed)
+        self._close_all_tabs_in_widget(tab_widget)
+        tab_widget.setParent(None)
+        tab_widget.deleteLater()
+    
+    def close_split(self, tab_widget=None):
+        """Close a split pane, unwrapping nested splitters as needed."""
+        if tab_widget is None:
+            tab_widget = self._active_tab_widget
+        
+        if tab_widget is None:
+            return
+        
+        all_tw = self._all_tab_widgets()
+        if len(all_tw) <= 1:
+            return
+        
+        parent = tab_widget.parentWidget()
+        
+        if isinstance(parent, QSplitter) and parent is not self:
+            self._remove_tab_widget(tab_widget)
+            
+            if parent.count() == 1:
+                remaining = parent.widget(0)
+                top_idx = self.indexOf(parent)
+                self.replaceWidget(top_idx, remaining)
+                parent.setParent(None)
+                parent.deleteLater()
+            
+            self._select_new_active()
+            
+            # Defensive: unwrap if only a nested splitter remains at top level
+            if self.count() == 1 and isinstance(self.widget(0), QSplitter):
+                self._unwrap_nested(self.widget(0))
+                self._select_new_active()
+        elif parent is self and self.count() > 1:
+            self._remove_tab_widget(tab_widget)
+            
+            if self.count() == 1 and isinstance(self.widget(0), QSplitter):
+                self._unwrap_nested(self.widget(0))
+            
+            self._select_new_active()
+    
+    def _select_new_active(self):
+        """Select the first available tab widget as active."""
+        new_all = self._all_tab_widgets()
+        if new_all:
+            self._active_tab_widget = new_all[0]
+            self._active_tab_widget.setFocus()
+        else:
+            self._active_tab_widget = None
+        self._update_active_indicators()
+    
+    def _unwrap_nested(self, nested):
+        """Promote a nested splitter's children to top level and remove the splitter."""
+        self.setOrientation(nested.orientation())
+        while nested.count() > 0:
+            self.addWidget(nested.widget(0))
+        nested.setParent(None)
+        nested.deleteLater()
+    
+    def _on_tab_close_requested(self, tab_widget, index):
+        pane = tab_widget.widget(index)
+        if pane and pane.doc.is_modified and pane.doc.view_count == 1:
+            reply = QMessageBox.question(
+                self, "Save Changes?",
+                f"'{pane.doc.display_name}' has unsaved changes. Save?",
+                QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel
+            )
+            if reply == QMessageBox.Cancel:
+                return
+            if reply == QMessageBox.Save:
+                self._save_document(pane.doc)
+        
+        remaining = tab_widget.close_tab(index)
+        if remaining == 0 and pane:
+            self.doc_manager.close_document(pane.doc)
+    
+    def _save_document(self, doc):
+        """Save a document - delegates to parent TextEditor if available."""
+        parent = self.parent()
+        while parent and not isinstance(parent, QMainWindow):
+            parent = parent.parent()
+        if parent and hasattr(parent, '_save_document'):
+            return parent._save_document(doc)
+        return False
+    
+    def _on_editor_changed(self, pane):
+        if pane:
+            for tw in self._all_tab_widgets():
+                if tw.current_editor() is pane:
+                    if self._active_tab_widget is not tw:
+                        self._active_tab_widget = tw
+                        self._update_active_indicators()
+                    break
+            self.active_editor_changed.emit(pane)
+    
+    def _on_all_tabs_closed(self, tab_widget):
+        if self._total_leaf_count() > 1:
+            self.close_split(tab_widget)
+
+
 class FileTreeView(QTreeView):
     """File system tree view with collapsible folders."""
     
@@ -1358,7 +2006,7 @@ class FileTreeView(QTreeView):
 
 
 class TextEditor(QMainWindow):
-    """Main text editor window."""
+    """Main text editor window with tabs and split view support."""
     
     def __init__(self):
         super().__init__()
@@ -1366,6 +2014,7 @@ class TextEditor(QMainWindow):
         self.setGeometry(100, 100, 1200, 800)
         
         self.dark_mode = True
+        self.doc_manager = DocumentManager(self)
         
         self._setup_ui()
         self._setup_menu()
@@ -1374,6 +2023,13 @@ class TextEditor(QMainWindow):
         self._setup_shortcuts()
         
         self._apply_dark_theme()
+        
+        self._new_file()
+    
+    @property
+    def editor(self):
+        """Returns the currently active editor pane for backward compatibility."""
+        return self.split_container.current_editor()
     
     def _setup_ui(self):
         """Set up the main UI components."""
@@ -1389,10 +2045,11 @@ class TextEditor(QMainWindow):
         self.file_tree.setMaximumWidth(400)
         self.file_tree.doubleClicked.connect(self._on_file_double_clicked)
         
-        self.editor = CodeEditor()
+        self.split_container = SplitContainer(self.doc_manager, Qt.Horizontal, self)
+        self.split_container.active_editor_changed.connect(self._on_active_editor_changed)
         
         splitter.addWidget(self.file_tree)
-        splitter.addWidget(self.editor)
+        splitter.addWidget(self.split_container)
         splitter.setSizes([250, 950])
         
         self.central_layout.addWidget(splitter)
@@ -1448,36 +2105,36 @@ class TextEditor(QMainWindow):
         
         undo_action = QAction("&Undo", self)
         undo_action.setShortcut(QKeySequence.Undo)
-        undo_action.triggered.connect(self.editor.undo)
+        undo_action.triggered.connect(self._undo)
         edit_menu.addAction(undo_action)
         
         redo_action = QAction("&Redo", self)
         redo_action.setShortcut(QKeySequence.Redo)
-        redo_action.triggered.connect(self.editor.redo)
+        redo_action.triggered.connect(self._redo)
         edit_menu.addAction(redo_action)
         
         edit_menu.addSeparator()
         
         cut_action = QAction("Cu&t", self)
         cut_action.setShortcut(QKeySequence.Cut)
-        cut_action.triggered.connect(self.editor.cut)
+        cut_action.triggered.connect(self._cut)
         edit_menu.addAction(cut_action)
         
         copy_action = QAction("&Copy", self)
         copy_action.setShortcut(QKeySequence.Copy)
-        copy_action.triggered.connect(self.editor.copy)
+        copy_action.triggered.connect(self._copy)
         edit_menu.addAction(copy_action)
         
         paste_action = QAction("&Paste", self)
         paste_action.setShortcut(QKeySequence.Paste)
-        paste_action.triggered.connect(self.editor.paste)
+        paste_action.triggered.connect(self._paste)
         edit_menu.addAction(paste_action)
         
         edit_menu.addSeparator()
         
         select_all_action = QAction("Select &All", self)
         select_all_action.setShortcut(QKeySequence.SelectAll)
-        select_all_action.triggered.connect(self.editor.selectAll)
+        select_all_action.triggered.connect(self._select_all)
         edit_menu.addAction(select_all_action)
         
         find_action = QAction("&Find...", self)
@@ -1494,10 +2151,34 @@ class TextEditor(QMainWindow):
         
         view_menu.addSeparator()
         
+        split_right_action = QAction("Split &Right", self)
+        split_right_action.setShortcut("Ctrl+\\")
+        split_right_action.triggered.connect(self._split_right)
+        view_menu.addAction(split_right_action)
+        
+        split_down_action = QAction("Split &Down", self)
+        split_down_action.setShortcut("Ctrl+Shift+\\")
+        split_down_action.triggered.connect(self._split_down)
+        view_menu.addAction(split_down_action)
+        
+        close_split_action = QAction("&Close Split", self)
+        close_split_action.setShortcut("Ctrl+Shift+W")
+        close_split_action.triggered.connect(self._close_split)
+        view_menu.addAction(close_split_action)
+        
+        view_menu.addSeparator()
+        
         self.toggle_theme_action = QAction("Switch to &Light Mode", self)
         self.toggle_theme_action.setShortcut("Ctrl+Shift+T")
         self.toggle_theme_action.triggered.connect(self._toggle_theme)
         view_menu.addAction(self.toggle_theme_action)
+        
+        view_menu.addSeparator()
+        
+        close_tab_action = QAction("Close &Tab", self)
+        close_tab_action.setShortcut("Ctrl+W")
+        close_tab_action.triggered.connect(self._close_current_tab)
+        view_menu.addAction(close_tab_action)
     
     def _setup_toolbar(self):
         """Set up the toolbar."""
@@ -1510,21 +2191,43 @@ class TextEditor(QMainWindow):
         self.save_toolbar_action = toolbar.addAction("Save", self._save_file)
         self.save_as_toolbar_action = toolbar.addAction("Save As", self._save_file_as)
         toolbar.addSeparator()
-        toolbar.addAction("Undo", self.editor.undo)
-        toolbar.addAction("Redo", self.editor.redo)
+        toolbar.addAction("Undo", self._undo)
+        toolbar.addAction("Redo", self._redo)
     
     def _setup_statusbar(self):
         """Set up the status bar."""
         self.statusbar = QStatusBar()
         self.setStatusBar(self.statusbar)
         self.statusbar.showMessage("Ready")
-        
-        self.editor.cursorPositionChanged.connect(self._update_cursor_position)
     
     def _setup_shortcuts(self):
         """Set up additional keyboard shortcuts."""
         redo_shortcut = QShortcut(QKeySequence("Ctrl+Y"), self)
-        redo_shortcut.activated.connect(self.editor.redo)
+        redo_shortcut.activated.connect(self._redo)
+    
+    def _undo(self):
+        if self.editor:
+            self.editor.undo()
+    
+    def _redo(self):
+        if self.editor:
+            self.editor.redo()
+    
+    def _cut(self):
+        if self.editor:
+            self.editor.cut()
+    
+    def _copy(self):
+        if self.editor:
+            self.editor.copy()
+    
+    def _paste(self):
+        if self.editor:
+            self.editor.paste()
+    
+    def _select_all(self):
+        if self.editor:
+            self.editor.selectAll()
     
     def _apply_dark_theme(self):
         """Apply dark theme styling."""
@@ -1585,6 +2288,38 @@ class TextEditor(QMainWindow):
             }
             QSplitter::handle {
                 background-color: #3c3c3c;
+            }
+            QTabWidget::pane {
+                border: none;
+                background-color: #1e1e1e;
+            }
+            QTabBar {
+                background-color: #252526;
+            }
+            QTabBar::tab {
+                background-color: #2d2d2d;
+                color: #969696;
+                padding: 8px 16px;
+                margin-right: 1px;
+                border: none;
+                border-bottom: 2px solid transparent;
+            }
+            QTabBar::tab:selected {
+                background-color: #1e1e1e;
+                color: #ffffff;
+                border-bottom: 2px solid #007acc;
+            }
+            QTabBar::tab:hover:!selected {
+                background-color: #383838;
+                color: #d4d4d4;
+            }
+            QTabBar::close-button {
+                subcontrol-position: right;
+                padding: 2px;
+            }
+            QTabBar::close-button:hover {
+                background-color: #5a5a5a;
+                border-radius: 3px;
             }
             QScrollBar:vertical {
                 background-color: #1e1e1e;
@@ -1678,6 +2413,38 @@ class TextEditor(QMainWindow):
             QSplitter::handle {
                 background-color: #c0c0c0;
             }
+            QTabWidget::pane {
+                border: none;
+                background-color: #ffffff;
+            }
+            QTabBar {
+                background-color: #f3f3f3;
+            }
+            QTabBar::tab {
+                background-color: #ececec;
+                color: #616161;
+                padding: 8px 16px;
+                margin-right: 1px;
+                border: none;
+                border-bottom: 2px solid transparent;
+            }
+            QTabBar::tab:selected {
+                background-color: #ffffff;
+                color: #1e1e1e;
+                border-bottom: 2px solid #0078d4;
+            }
+            QTabBar::tab:hover:!selected {
+                background-color: #e0e0e0;
+                color: #1e1e1e;
+            }
+            QTabBar::close-button {
+                subcontrol-position: right;
+                padding: 2px;
+            }
+            QTabBar::close-button:hover {
+                background-color: #c0c0c0;
+                border-radius: 3px;
+            }
             QScrollBar:vertical {
                 background-color: #f0f0f0;
                 width: 14px;
@@ -1715,10 +2482,93 @@ class TextEditor(QMainWindow):
         else:
             self._apply_light_theme()
             self.toggle_theme_action.setText("Switch to &Dark Mode")
-        self.editor.set_dark_mode(self.dark_mode)
+        
+        self.split_container.set_dark_mode(self.dark_mode)
+    
+    def _on_active_editor_changed(self, pane):
+        """Handle when active editor changes."""
+        if hasattr(self, '_cursor_connected_pane') and self._cursor_connected_pane is not None:
+            try:
+                self._cursor_connected_pane.cursorPositionChanged.disconnect(self._update_cursor_position)
+            except (TypeError, RuntimeError):
+                pass
+        if pane:
+            self._update_window_title()
+            self._update_cursor_position()
+            pane.cursorPositionChanged.connect(self._update_cursor_position)
+            self._cursor_connected_pane = pane
+        else:
+            self._cursor_connected_pane = None
+    
+    def _update_window_title(self):
+        """Update window title based on current document."""
+        if self.editor and self.editor.doc:
+            doc = self.editor.doc
+            name = doc.display_name
+            self.setWindowTitle(f"Text Editor - {name}")
+        else:
+            self.setWindowTitle("Text Editor")
+    
+    def _split_right(self):
+        """Split the editor horizontally with a new blank tab."""
+        # If no tabs are open, just create a blank tab instead of splitting
+        active_tw = self.split_container.active_tab_widget()
+        if active_tw is not None and active_tw.count() == 0:
+            self._new_file()
+            return
+        new_tabs = self.split_container.split(Qt.Horizontal)
+        if new_tabs is not None:
+            doc = self.doc_manager.get_or_create_document()
+            pane = self.split_container.open_document(doc)
+            if pane:
+                pane.setFocus()
+    
+    def _split_down(self):
+        """Split the editor vertically with a new blank tab."""
+        # If no tabs are open, just create a blank tab instead of splitting
+        active_tw = self.split_container.active_tab_widget()
+        if active_tw is not None and active_tw.count() == 0:
+            self._new_file()
+            return
+        new_tabs = self.split_container.split(Qt.Vertical)
+        if new_tabs is not None:
+            doc = self.doc_manager.get_or_create_document()
+            pane = self.split_container.open_document(doc)
+            if pane:
+                pane.setFocus()
+    
+    def _close_split(self):
+        """Close the current split."""
+        if self.split_container._total_leaf_count() > 1:
+            active_tw = self.split_container.active_tab_widget()
+            if active_tw:
+                for i in range(active_tw.count() - 1, -1, -1):
+                    pane = active_tw.widget(i)
+                    if pane and pane.doc.is_modified and pane.doc.view_count == 1:
+                        reply = QMessageBox.question(
+                            self, "Save Changes?",
+                            f"'{pane.doc.display_name}' has unsaved changes. Save?",
+                            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel
+                        )
+                        if reply == QMessageBox.Cancel:
+                            return
+                        if reply == QMessageBox.Save:
+                            self._save_document(pane.doc)
+                    active_tw.close_tab(i)
+                self.split_container.close_split(active_tw)
+    
+    def _close_current_tab(self):
+        """Close the current tab."""
+        active_tw = self.split_container.active_tab_widget()
+        if active_tw and active_tw.count() > 0:
+            index = active_tw.currentIndex()
+            active_tw.tabCloseRequested.emit(index)
     
     def _update_cursor_position(self):
         """Update cursor position in status bar."""
+        if not self.editor:
+            self.statusbar.showMessage("Ready")
+            return
         cursor = self.editor.textCursor()
         line = cursor.blockNumber() + 1
         col = cursor.columnNumber() + 1
@@ -1737,32 +2587,24 @@ class TextEditor(QMainWindow):
     
     def _cleanup_file_explorer(self):
         """Collapse all file explorer directories except for the current file's path."""
-        current_file = self.editor.current_file
+        current_file = self.editor.current_file if self.editor else None
         self.file_tree.cleanup_explorer(current_file)
     
     def _new_file(self):
-        """Create a new file."""
-        if self._check_save():
-            self.editor.blockSignals(True)
-            self.editor.clear()
-            self.editor.set_language(None)
-            self.editor.blockSignals(False)
-            self.editor.current_file = None
-            self.editor.is_modified = False
-            self.editor.is_invalid_file = False
-            self.setWindowTitle("Text Editor - New File")
-            self._update_language_status()
-            self.editor.update_line_number_area_width(0)
+        """Create a new file in a new tab."""
+        doc = self.doc_manager.get_or_create_document()
+        self.split_container.open_document(doc)
+        self._update_window_title()
+        self._update_language_status()
     
     def _open_file(self):
         """Open a file dialog to select a file."""
-        if self._check_save():
-            file_path, _ = QFileDialog.getOpenFileName(
-                self, "Open File", "",
-                "All Files (*);;Text Files (*.txt);;Python Files (*.py)"
-            )
-            if file_path:
-                self._open_file_path(file_path, check_save=False)
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Open File", "",
+            "All Files (*);;Text Files (*.txt);;Python Files (*.py)"
+        )
+        if file_path:
+            self._open_file_path(file_path)
     
     def _is_likely_binary(self, file_path):
         """Check if file is likely binary by reading first bytes."""
@@ -1804,12 +2646,15 @@ class TextEditor(QMainWindow):
             # If we can't determine, assume it's not binary
             return False
     
-    def _open_file_path(self, file_path, check_save=True):
-        """Open a specific file."""
-        if check_save and not self._check_save():
+    def _open_file_path(self, file_path, in_new_split=False):
+        """Open a specific file in a new tab, or focus existing tab if already open."""
+        existing_doc = self.doc_manager.get_document_by_path(file_path)
+        if existing_doc:
+            self.split_container.focus_or_open_document(existing_doc)
+            self._update_window_title()
+            self.file_tree.select_file(file_path)
             return
         
-        # Check for binary files before attempting to read
         if self._is_likely_binary(file_path):
             self._handle_invalid_file(file_path)
             return
@@ -1818,51 +2663,33 @@ class TextEditor(QMainWindow):
             with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
         except (UnicodeDecodeError, UnicodeError):
-            # Binary or incompatible file type - show error overlay instead of popup
             self._handle_invalid_file(file_path)
             return
         except (FileNotFoundError, IsADirectoryError, PermissionError) as e:
-            # Actual file access errors - show error dialog
             QMessageBox.critical(self, "Error", f"Could not open file:\n{str(e)}")
             return
         except Exception as e:
-            # Any other exception during read - treat as invalid file for safety
             self._handle_invalid_file(file_path)
             return
         
-        # File was successfully read as text
         try:
-            self.editor.blockSignals(True)
-            self.editor.setPlainText(content)
-            self.editor.set_language_from_file(file_path)
-            self.editor.blockSignals(False)
-            self.editor.current_file = file_path
-            self.editor.is_modified = False
-            self.editor.is_invalid_file = False
-            self.setWindowTitle(f"Text Editor - {os.path.basename(file_path)}")
+            doc = self.doc_manager.get_or_create_document(file_path)
+            doc.document.setPlainText(content)
+            doc.is_modified = False
+            
+            self.split_container.open_document(doc, in_new_split=in_new_split)
+            self._update_window_title()
             self._update_language_status()
-            self.editor.update_line_number_area_width(0)
             self.file_tree.select_file(file_path)
-            self._show_error_overlay(False)
         except Exception as e:
-            # Any error during editor setup - show error dialog
             QMessageBox.critical(self, "Error", f"Could not open file:\n{str(e)}")
     
     def _handle_invalid_file(self, file_path):
         """Handle opening of incompatible file type."""
-        try:
-            self.editor.blockSignals(True)
-            self.editor.clear()
-            self.editor.blockSignals(False)
-            self.editor.current_file = file_path
-            self.editor.is_modified = False
-            self.editor.is_invalid_file = True
-            self.setWindowTitle(f"Text Editor - {os.path.basename(file_path)}")
-            self._update_language_status()
-            self._show_error_overlay(True)
-        except Exception as e:
-            # Fallback error handling if invalid file display fails
-            QMessageBox.critical(self, "Error", f"Could not open file:\n{str(e)}")
+        QMessageBox.warning(
+            self, "Incompatible File",
+            f"Cannot open '{os.path.basename(file_path)}': Binary or incompatible file type."
+        )
     
     def _open_folder(self):
         """Open a folder in the file tree."""
@@ -1872,16 +2699,22 @@ class TextEditor(QMainWindow):
     
     def _save_file(self):
         """Save the current file."""
-        if self.editor.is_invalid_file:
+        if not self.editor:
             return
-        if self.editor.current_file:
-            self._save_to_path(self.editor.current_file)
+        doc = self.editor.doc
+        if doc.is_invalid_file:
+            return
+        if doc.file_path:
+            self._save_document(doc)
         else:
             self._save_file_as()
     
     def _save_file_as(self):
         """Save file with a new name."""
-        if self.editor.is_invalid_file:
+        if not self.editor:
+            return
+        doc = self.editor.doc
+        if doc.is_invalid_file:
             return
         dialog = QFileDialog(self, "Save File")
         dialog.setAcceptMode(QFileDialog.AcceptSave)
@@ -1897,7 +2730,8 @@ class TextEditor(QMainWindow):
         if dialog.exec_() == QFileDialog.Accepted:
             file_path = dialog.selectedFiles()[0]
             if file_path:
-                self._save_to_path(file_path)
+                self.doc_manager.update_document_path(doc, file_path)
+                self._save_document(doc)
     
     def _create_new_folder(self, dialog):
         """Create a new folder in the current directory of the file dialog."""
@@ -1911,32 +2745,75 @@ class TextEditor(QMainWindow):
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Could not create folder:\n{str(e)}")
     
-    def _save_to_path(self, file_path):
-        """Save content to a specific path."""
+    def _save_document(self, doc):
+        """Save a document to its file path."""
+        if not doc.file_path:
+            return False
         try:
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write(self.editor.toPlainText())
-            self.editor.current_file = file_path
-            self.editor.is_modified = False
-            self.setWindowTitle(f"Text Editor - {os.path.basename(file_path)}")
+            with open(doc.file_path, 'w', encoding='utf-8') as f:
+                f.write(doc.document.toPlainText())
+            doc.is_modified = False
+            self._update_window_title()
             self.statusbar.showMessage("File saved", 3000)
-            self.file_tree.select_file(file_path)
+            self.file_tree.select_file(doc.file_path)
+            return True
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Could not save file:\n{str(e)}")
+            return False
     
-    def _check_save(self):
-        """Check if document needs saving before proceeding."""
-        if self.editor.is_modified:
-            reply = QMessageBox.question(
-                self, "Save Changes?",
-                "The document has been modified. Save changes?",
-                QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel
-            )
-            if reply == QMessageBox.Save:
-                self._save_file()
-                return not self.editor.is_modified
-            elif reply == QMessageBox.Cancel:
-                return False
+    def _save_to_path(self, file_path):
+        """Save current document to a specific path (for backward compatibility)."""
+        if not self.editor:
+            return False
+        doc = self.editor.doc
+        self.doc_manager.update_document_path(doc, file_path)
+        return self._save_document(doc)
+    
+    def _check_save_all(self):
+        """Check if any documents need saving before closing."""
+        if getattr(self, '_skip_save_check', False):
+            return True
+        try:
+            if not hasattr(self, 'doc_manager') or self.doc_manager is None:
+                return True
+            
+            try:
+                docs = list(self.doc_manager.documents)
+            except (RuntimeError, AttributeError):
+                return True
+            
+            for doc in docs:
+                try:
+                    if doc is None:
+                        continue
+                    try:
+                        is_mod = doc.is_modified
+                    except (RuntimeError, AttributeError, OSError):
+                        continue
+                    if is_mod:
+                        reply = QMessageBox.question(
+                            self, "Save Changes?",
+                            f"'{doc.display_name}' has unsaved changes. Save?",
+                            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel
+                        )
+                        if reply == QMessageBox.Cancel:
+                            return False
+                        if reply == QMessageBox.Save:
+                            if doc.file_path:
+                                if not self._save_document(doc):
+                                    return False
+                            else:
+                                self.split_container.focus_or_open_document(doc)
+                                self._save_file_as()
+                                try:
+                                    if doc.is_modified:
+                                        return False
+                                except (RuntimeError, AttributeError, OSError):
+                                    pass
+                except (RuntimeError, AttributeError, OSError):
+                    continue
+        except (RuntimeError, AttributeError, OSError):
+            pass
         return True
     
     def _toggle_file_tree(self):
@@ -1948,42 +2825,18 @@ class TextEditor(QMainWindow):
         dialog = FindReplaceDialog(self)
         dialog.exec_()
     
-    def _show_error_overlay(self, show_error):
-        """Show or hide error overlay for incompatible files."""
-        if show_error:
-            if not hasattr(self, 'striped_overlay'):
-                self.striped_overlay = StripedOverlay()
-            
-            # Hide editor and show striped overlay
-            self.editor.hide()
-            # Check if overlay is already in splitter
-            if self.splitter.indexOf(self.striped_overlay) < 0:
-                self.splitter.addWidget(self.striped_overlay)
-            self.striped_overlay.show()
-            
-            # Disable and grey out save actions
-            self.save_action.setEnabled(False)
-            self.save_as_action.setEnabled(False)
-            self.save_toolbar_action.setEnabled(False)
-            self.save_as_toolbar_action.setEnabled(False)
-        else:
-            # Show editor and hide striped overlay
-            if hasattr(self, 'striped_overlay') and self.splitter.indexOf(self.striped_overlay) >= 0:
-                self.striped_overlay.hide()
-            self.editor.show()
-            
-            # Enable save actions
-            self.save_action.setEnabled(True)
-            self.save_as_action.setEnabled(True)
-            self.save_toolbar_action.setEnabled(True)
-            self.save_as_toolbar_action.setEnabled(True)
-    
     def closeEvent(self, event):
         """Handle window close event."""
-        if self._check_save():
+        try:
+            if getattr(self, '_skip_save_check', False):
+                event.accept()
+                return
+            if self._check_save_all():
+                event.accept()
+            else:
+                event.ignore()
+        except (RuntimeError, AttributeError, OSError):
             event.accept()
-        else:
-            event.ignore()
 
 
 def main():
