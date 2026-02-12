@@ -26,30 +26,26 @@ from text_editor import (
 def editor(qtbot):
     """Create a CodeEditor instance."""
     ed = CodeEditor()
-    qtbot.addWidget(ed)
-    ed.show()
-    qtbot.waitExposed(ed)
-    return ed
+    yield ed
+    ed.is_modified = False
+    ed.close()
 
 
 @pytest.fixture
 def file_tree(qtbot):
     """Create a FileTreeView instance."""
     tree = FileTreeView()
-    qtbot.addWidget(tree)
-    tree.show()
-    qtbot.waitExposed(tree)
-    return tree
+    yield tree
+    tree.close()
 
 
 @pytest.fixture
 def main_window(qtbot):
     """Create a TextEditor main window instance."""
     window = TextEditor()
-    qtbot.addWidget(window)
-    window.show()
-    qtbot.waitExposed(window)
-    return window
+    yield window
+    window.editor.is_modified = False
+    window.close()
 
 
 @pytest.fixture
@@ -429,6 +425,8 @@ class TestTextEditorMainWindow:
 
     def test_toggle_file_tree(self, main_window):
         """Test toggling file tree visibility."""
+        # Need to show window for visibility tests to work
+        main_window.show()
         initial_visible = main_window.file_tree.isVisible()
         main_window._toggle_file_tree()
         assert main_window.file_tree.isVisible() != initial_visible
@@ -919,6 +917,8 @@ class TestIncompatibleFileHandling:
 
     def test_open_incompatible_file_shows_overlay(self, main_window, tmp_path, qtbot):
         """Test opening incompatible file shows striped overlay."""
+        # Need to show window for visibility tests to work
+        main_window.show()
         binary_file = tmp_path / "test.bin"
         binary_file.write_bytes(b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR')
         
@@ -1033,141 +1033,138 @@ class TestEditorLanguageIntegration:
         assert main_window.editor.is_modified is False
 
 
+@pytest.fixture
+def find_replace_dialog(main_window, qtbot):
+    """Create a FindReplaceDialog instance with automatic cleanup."""
+    dialog = FindReplaceDialog(main_window)
+    yield dialog
+    dialog.close()
+
+
 class TestFindReplaceDialog:
     """Tests for FindReplaceDialog functionality."""
     
-    def test_dialog_creation(self, main_window, qtbot):
+    @pytest.mark.timeout(30)
+    def test_dialog_creation(self, main_window, find_replace_dialog, qtbot):
         """Test FindReplaceDialog is created with editor."""
-        dialog = FindReplaceDialog(main_window)
-        qtbot.addWidget(dialog)
-        assert dialog is not None
-        assert dialog.editor is not None
+        assert find_replace_dialog is not None
+        assert find_replace_dialog.editor is not None
     
-    def test_find_next_basic(self, main_window, qtbot):
+    @pytest.mark.timeout(30)
+    def test_find_next_basic(self, main_window, find_replace_dialog, qtbot):
         """Test finding next occurrence of text."""
         main_window.editor.setPlainText("Hello World Hello World")
-        dialog = FindReplaceDialog(main_window)
-        qtbot.addWidget(dialog)
         
-        dialog.find_input.setText("Hello")
-        dialog.find_next()
+        find_replace_dialog.find_input.setText("Hello")
+        find_replace_dialog.find_next()
         
         cursor = main_window.editor.textCursor()
         assert cursor.hasSelection()
         assert "Hello" in main_window.editor.toPlainText()[cursor.selectionStart():cursor.selectionEnd()]
     
-    def test_find_previous(self, main_window, qtbot):
+    @pytest.mark.timeout(30)
+    def test_find_previous(self, main_window, find_replace_dialog, qtbot):
         """Test finding previous occurrence of text."""
         main_window.editor.setPlainText("Hello World Hello World")
-        dialog = FindReplaceDialog(main_window)
-        qtbot.addWidget(dialog)
         
         # Move cursor to end
         cursor = main_window.editor.textCursor()
         cursor.movePosition(QTextCursor.End)
         main_window.editor.setTextCursor(cursor)
         
-        dialog.find_input.setText("Hello")
-        dialog.find_previous()
+        find_replace_dialog.find_input.setText("Hello")
+        find_replace_dialog.find_previous()
         
         cursor = main_window.editor.textCursor()
         assert cursor.hasSelection()
     
-    def test_find_not_found(self, main_window, qtbot):
+    @pytest.mark.timeout(30)
+    def test_find_not_found(self, main_window, find_replace_dialog, qtbot):
         """Test find when text is not found."""
         main_window.editor.setPlainText("Hello World")
-        dialog = FindReplaceDialog(main_window)
-        qtbot.addWidget(dialog)
         
-        dialog.find_input.setText("NotFound")
-        dialog.find_next()
+        find_replace_dialog.find_input.setText("NotFound")
+        find_replace_dialog.find_next()
         
-        assert "not found" in dialog.status_label.text().lower()
+        assert "not found" in find_replace_dialog.status_label.text().lower()
     
-    def test_find_empty_search(self, main_window, qtbot):
+    @pytest.mark.timeout(30)
+    def test_find_empty_search(self, main_window, find_replace_dialog, qtbot):
         """Test find with empty search text."""
         main_window.editor.setPlainText("Hello World")
-        dialog = FindReplaceDialog(main_window)
-        qtbot.addWidget(dialog)
         
-        dialog.find_input.setText("")
-        dialog.find_next()
+        find_replace_dialog.find_input.setText("")
+        find_replace_dialog.find_next()
         
-        assert "Please enter search text" in dialog.status_label.text()
+        assert "Please enter search text" in find_replace_dialog.status_label.text()
     
-    def test_case_sensitive_search(self, main_window, qtbot):
+    @pytest.mark.timeout(30)
+    def test_case_sensitive_search(self, main_window, find_replace_dialog, qtbot):
         """Test case-sensitive search."""
         main_window.editor.setPlainText("Hello hello HELLO")
-        dialog = FindReplaceDialog(main_window)
-        qtbot.addWidget(dialog)
         
-        dialog.find_input.setText("hello")
-        dialog.case_sensitive_checkbox.setChecked(True)
-        dialog.find_next()
+        find_replace_dialog.find_input.setText("hello")
+        find_replace_dialog.case_sensitive_checkbox.setChecked(True)
+        find_replace_dialog.find_next()
         
         cursor = main_window.editor.textCursor()
         selected_text = main_window.editor.toPlainText()[cursor.selectionStart():cursor.selectionEnd()]
         assert selected_text == "hello"
     
-    def test_case_insensitive_search(self, main_window, qtbot):
+    @pytest.mark.timeout(30)
+    def test_case_insensitive_search(self, main_window, find_replace_dialog, qtbot):
         """Test case-insensitive search."""
         main_window.editor.setPlainText("Hello hello HELLO")
-        dialog = FindReplaceDialog(main_window)
-        qtbot.addWidget(dialog)
         
-        dialog.find_input.setText("HELLO")
-        dialog.case_sensitive_checkbox.setChecked(False)
-        dialog.find_next()
+        find_replace_dialog.find_input.setText("HELLO")
+        find_replace_dialog.case_sensitive_checkbox.setChecked(False)
+        find_replace_dialog.find_next()
         
         # Should find something
-        assert "Text found" in dialog.status_label.text()
+        assert "Text found" in find_replace_dialog.status_label.text()
     
-    def test_replace_current(self, main_window, qtbot):
+    @pytest.mark.timeout(30)
+    def test_replace_current(self, main_window, find_replace_dialog, qtbot):
         """Test replace current selection."""
         main_window.editor.setPlainText("Hello World Hello World")
-        dialog = FindReplaceDialog(main_window)
-        qtbot.addWidget(dialog)
         
-        dialog.find_input.setText("Hello")
-        dialog.replace_input.setText("Hi")
-        dialog.find_next()
+        find_replace_dialog.find_input.setText("Hello")
+        find_replace_dialog.replace_input.setText("Hi")
+        find_replace_dialog.find_next()
         
-        dialog.replace_current()
+        find_replace_dialog.replace_current()
         
         text = main_window.editor.toPlainText()
         assert text.startswith("Hi")
     
-    def test_replace_all(self, main_window, qtbot):
+    @pytest.mark.timeout(30)
+    def test_replace_all(self, main_window, find_replace_dialog, qtbot):
         """Test replace all occurrences."""
         main_window.editor.setPlainText("Hello World Hello World Hello")
-        dialog = FindReplaceDialog(main_window)
-        qtbot.addWidget(dialog)
         
-        dialog.find_input.setText("Hello")
-        dialog.replace_input.setText("Hi")
-        dialog.replace_all()
+        find_replace_dialog.find_input.setText("Hello")
+        find_replace_dialog.replace_input.setText("Hi")
+        find_replace_dialog.replace_all()
         
         text = main_window.editor.toPlainText()
         assert text.count("Hi") == 3
         assert "Hello" not in text
     
-    def test_replace_all_counter(self, main_window, qtbot):
+    @pytest.mark.timeout(30)
+    def test_replace_all_counter(self, main_window, find_replace_dialog, qtbot):
         """Test replace all shows count."""
         main_window.editor.setPlainText("foo bar foo baz foo")
-        dialog = FindReplaceDialog(main_window)
-        qtbot.addWidget(dialog)
         
-        dialog.find_input.setText("foo")
-        dialog.replace_input.setText("bar")
-        dialog.replace_all()
+        find_replace_dialog.find_input.setText("foo")
+        find_replace_dialog.replace_input.setText("bar")
+        find_replace_dialog.replace_all()
         
-        assert "3" in dialog.status_label.text()
+        assert "3" in find_replace_dialog.status_label.text()
     
-    def test_find_wrap_around(self, main_window, qtbot):
+    @pytest.mark.timeout(30)
+    def test_find_wrap_around(self, main_window, find_replace_dialog, qtbot):
         """Test find wraps around to beginning."""
         main_window.editor.setPlainText("Hello World Hello World")
-        dialog = FindReplaceDialog(main_window)
-        qtbot.addWidget(dialog)
         
         # Move cursor to middle
         cursor = main_window.editor.textCursor()
@@ -1175,29 +1172,28 @@ class TestFindReplaceDialog:
         main_window.editor.setTextCursor(cursor)
         
         # Find to end, then wrap around
-        dialog.find_input.setText("Hello")
-        dialog.find_next()
+        find_replace_dialog.find_input.setText("Hello")
+        find_replace_dialog.find_next()
         pos1 = main_window.editor.textCursor().position()
         
-        dialog.find_next()
+        find_replace_dialog.find_next()
         pos2 = main_window.editor.textCursor().position()
         
         # Should find second Hello, then wrap to first
         assert pos1 != pos2
     
-    def test_find_previous_wrap_around(self, main_window, qtbot):
+    @pytest.mark.timeout(30)
+    def test_find_previous_wrap_around(self, main_window, find_replace_dialog, qtbot):
         """Test find previous wraps around to end."""
         main_window.editor.setPlainText("Hello World Hello World")
-        dialog = FindReplaceDialog(main_window)
-        qtbot.addWidget(dialog)
         
         # Move cursor to beginning
         cursor = main_window.editor.textCursor()
         cursor.setPosition(0)
         main_window.editor.setTextCursor(cursor)
         
-        dialog.find_input.setText("Hello")
-        dialog.find_previous()
+        find_replace_dialog.find_input.setText("Hello")
+        find_replace_dialog.find_previous()
         
         # Should wrap to end and find last Hello
         cursor = main_window.editor.textCursor()
