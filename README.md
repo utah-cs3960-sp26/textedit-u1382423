@@ -31,6 +31,45 @@ Although I realized the initial design choice was not very thoughtful, I was abl
     For the parts that work, explain how you know that they work as intended. other words, explain what kind of tests you are using to validate the functionality of your editor.
 On top of the AI built tests of the file explorer handling, I have performed extensive manual tests on the use of the explorer. I tried opening and saving files to different locations to ensure the correct location was opened in the file tree explorer. I also tried opening and closing both empty directories and exceptionally large directories. I jumped through countless subdirectories and tries to trick the file explorer by opening hiden files (.* files are hidden - it only shows .* files the user created in that session). All have succeeded.
 
+# Pull Request - Tab and Split View Feature
+
+## Overview
+Added a tab-based document system with split view support, similar to VS Code. Users can now:
+- Open multiple files in tabs within the same window
+- Split the editor horizontally (Ctrl+\) or vertically (Ctrl+Shift+\)
+- Close tabs (Ctrl+W) and splits (Ctrl+Shift+W)
+- See which split is active via a blue border and highlighted tab
+- New files automatically open in the currently active split
+
+## Architecture
+
+### New Classes
+- **Document**: Wrapper around QTextDocument that holds file path, language, and modification state.
+- **DocumentManager**: Manages all open documents, provides lookup by file path, and prevents opening duplicate files.
+- **EditorPane**: Subclass of CodeEditor that delegates state (file_path, is_modified, language) to its Document. Emits `pane_focused` signal when clicked.
+- **EditorTabWidget**: QTabWidget managing multiple EditorPane tabs with close buttons. Tracks dark mode and propagates to new panes.
+- **SplitContainer**: QSplitter managing up to 5 EditorTabWidget splits with support for one level of nested splitting (e.g., vertical splits inside a horizontal layout). Tracks active split and updates visual indicators.
+
+### Key Technical Decisions
+1. **QPlainTextDocumentLayout**: QPlainTextEdit requires a QPlainTextDocumentLayout on its document, so Document.__init__ must explicitly set the layout.
+2. **QTabWidget.__bool__**: Returns False when empty, so all widget checks use `is not None` instead of truthy checks.
+3. **EditorPane property setters**: Are no-ops because CodeEditor.__init__ sets properties that would overwrite Document values.
+4. **Focus tracking**: EditorPane.focusInEvent emits a signal that propagates up to SplitContainer to update the active split indicator.
+5. **Dark mode propagation**: Dark mode setting flows from SplitContainer → EditorTabWidget → EditorPane to ensure new tabs use the correct theme.
+
+## Menu Items
+- View → Split Right (Ctrl+\)
+- View → Split Down (Ctrl+Shift+\)
+- View → Close Split (Ctrl+Shift+W)
+- View → Close Tab (Ctrl+W)
+
+## Testing
+Added tests for the tab/split functionality:
+- TestDocument: 7 tests for Document class
+- TestDocumentManager: 6 tests for DocumentManager class  
+- TestTabAndSplitFeatures: 23 tests for integrated tab/split behavior including nested splits
+
+All 175 tests pass.
 ## Features
 
 ### 1. Automatic Indentation and Bracket/Quote Matching
