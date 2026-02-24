@@ -1640,6 +1640,28 @@ class TestAddWorkspace:
         assert isinstance(wrapper, QSplitter)
         assert wrapper.orientation() == Qt.Horizontal
 
+    def test_add_workspace_horizontal_no_tabs_does_not_split(self, main_window, qtbot):
+        """When no tabs are open, Add Workspace Horizontal should just open a file, not split."""
+        active_tw = main_window.split_container.active_tab_widget()
+        for i in range(active_tw.count() - 1, -1, -1):
+            active_tw.close_tab(i)
+        assert active_tw.count() == 0
+        initial_leaf_count = main_window.split_container._total_leaf_count()
+        main_window._add_workspace_horizontal()
+        assert main_window.split_container._total_leaf_count() == initial_leaf_count
+        assert active_tw.count() == 1
+
+    def test_add_workspace_vertical_no_tabs_does_not_split(self, main_window, qtbot):
+        """When no tabs are open, Add Workspace Vertical should just open a file, not split."""
+        active_tw = main_window.split_container.active_tab_widget()
+        for i in range(active_tw.count() - 1, -1, -1):
+            active_tw.close_tab(i)
+        assert active_tw.count() == 0
+        initial_leaf_count = main_window.split_container._total_leaf_count()
+        main_window._add_workspace_vertical()
+        assert main_window.split_container._total_leaf_count() == initial_leaf_count
+        assert active_tw.count() == 1
+
 
 class TestDocumentInvalidFile:
     """Tests for Document.is_invalid_file setter."""
@@ -2454,7 +2476,6 @@ class TestOpenDocumentInNewSplitMultiple:
         new_active = main_window.split_container.active_tab_widget()
         assert new_active is not active
 
-
 class TestCloseSplitNoneActive:
     """Test close_split when _active_tab_widget is None."""
 
@@ -2554,7 +2575,6 @@ class TestOpenFileException:
             with patch.object(QMessageBox, 'critical'):
                 main_window._open_file_path(str(text_file))
 
-
 class TestSplitRightDownEmptyActive:
     """Test _split_right/_split_down when active tab count is 0."""
 
@@ -2576,7 +2596,6 @@ class TestSplitRightDownEmptyActive:
         assert tw.count() == 0
         main_window._split_down()
         assert tw.count() > 0
-
 
 class TestCloseTabInvalid:
     """Test EditorTabWidget.close_tab with invalid index."""
@@ -2690,7 +2709,6 @@ class TestCloseTabDisconnectException:
         pane._doc_connections = [(mock_doc, 'modified_changed', lambda: None)]
         tw.close_tab(tw.count() - 1)
 
-
 class TestOpenDocumentNoActiveTabWidget:
     """Test open_document returns None when _active_tab_widget is None (line 1729)."""
 
@@ -2712,7 +2730,6 @@ class TestFocusOrOpenDocumentFallback:
         doc.document.setPlainText("new content")
         result = main_window.split_container.focus_or_open_document(doc)
         assert result is not None
-
 
 class TestCollapseSingleChildSplittersBreak:
     """Test _collapse_single_child_splitters break when parent is not QSplitter (line 1917)."""

@@ -2609,6 +2609,10 @@ class TextEditor(QMainWindow):
     
     def _add_workspace_horizontal(self):
         """Add a new workspace tab to the right."""
+        active_tw = self.split_container.active_tab_widget()
+        if active_tw is not None and active_tw.count() == 0:
+            self._new_file()
+            return
         new_tabs = self.split_container.add_pane(Qt.Horizontal)
         if new_tabs is not None:
             doc = self.doc_manager.get_or_create_document()
@@ -2618,6 +2622,10 @@ class TextEditor(QMainWindow):
     
     def _add_workspace_vertical(self):
         """Add a new workspace tab to the bottom."""
+        active_tw = self.split_container.active_tab_widget()
+        if active_tw is not None and active_tw.count() == 0:
+            self._new_file()
+            return
         new_tabs = self.split_container.add_pane(Qt.Vertical)
         if new_tabs is not None:
             doc = self.doc_manager.get_or_create_document()
