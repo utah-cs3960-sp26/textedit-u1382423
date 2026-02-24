@@ -20,7 +20,7 @@ from text_editor import (
     CodeEditor, FileTreeView, TextEditor, LineNumberArea, main,
     SyntaxHighlighter, LANGUAGE_DEFINITIONS, get_language_for_file,
     FindReplaceDialog, Document, DocumentManager, EditorPane, EditorTabWidget,
-    SplitContainer, StripedOverlay
+    SplitContainer, StripedOverlay, FrameTimerWidget
 )
 
 
@@ -1145,6 +1145,44 @@ class TestFindReplaceDialog:
         find_replace_dialog.replace_all()
         
         assert "3" in find_replace_dialog.status_label.text()
+    
+    @pytest.mark.timeout(30)
+    def test_replace_all_large_file_performance(self, main_window, find_replace_dialog, qtbot):
+        """Test replace all on a large file completes quickly without freezing."""
+        # Build a large document with many occurrences of the search term
+        line = "foo bar baz foo qux foo\n"
+        large_text = line * 5000  # ~120k chars, 15000 occurrences of "foo"
+        main_window.editor.setPlainText(large_text)
+        
+        find_replace_dialog.find_input.setText("foo")
+        find_replace_dialog.replace_input.setText("replaced")
+        
+        import time
+        start = time.time()
+        find_replace_dialog.replace_all()
+        elapsed = time.time() - start
+        
+        text = main_window.editor.toPlainText()
+        assert "foo" not in text
+        assert text.count("replaced") == 15000
+        assert "15000" in find_replace_dialog.status_label.text()
+        # Should complete in under 15 seconds even on slow CI
+        assert elapsed < 15, f"replace_all took {elapsed:.1f}s, expected < 15s"
+    
+    @pytest.mark.timeout(30)
+    def test_replace_all_single_undo_block(self, main_window, find_replace_dialog, qtbot):
+        """Test that replace all can be undone in a single undo operation."""
+        main_window.editor.setPlainText("aaa bbb aaa ccc aaa")
+        
+        find_replace_dialog.find_input.setText("aaa")
+        find_replace_dialog.replace_input.setText("zzz")
+        find_replace_dialog.replace_all()
+        
+        assert main_window.editor.toPlainText() == "zzz bbb zzz ccc zzz"
+        
+        # A single undo should revert the entire replace-all
+        main_window.editor.document().undo()
+        assert main_window.editor.toPlainText() == "aaa bbb aaa ccc aaa"
     
     @pytest.mark.timeout(30)
     def test_find_wrap_around(self, main_window, find_replace_dialog, qtbot):
@@ -2904,6 +2942,241 @@ class TestCheckSaveAllSaveAsStillModified:
             result = main_window._check_save_all()
         assert result is True
 
+
+
+class TestFrameTimerWidget:
+    """Tests for the FrameTimerWidget class."""
+
+    def test_initial_state_hidden(self, main_window, qtbot):
+        """Test that frame timer starts hidden and inactive."""
+        ftw = main_window.frame_timer_widget
+        assert not ftw.isVisible()
+        assert not ftw.active
+
+    def test_toggle_shows_and_hides(self, main_window, qtbot):
+        """Test that toggle() shows then hides the widget."""
+        ftw = main_window.frame_timer_widget
+        ftw.toggle()
+        assert ftw.active
+        assert not ftw.isHidden()
+        ftw.toggle()
+        assert not ftw.active
+        assert ftw.isHidden()
+
+    def test_ctrl_p_toggles_frame_timer(self, main_window, qtbot):
+        """Test that Ctrl+P shortcut toggles the frame timer."""
+        ftw = main_window.frame_timer_widget
+        assert not ftw.active
+        main_window._toggle_frame_timer()
+        assert ftw.active
+        main_window._toggle_frame_timer()
+        assert not ftw.active
+
+    def test_stats_reset_on_hide(self, main_window, qtbot):
+        """Test that statistics are reset when the widget is hidden."""
+        ftw = main_window.frame_timer_widget
+        ftw.toggle()  # start
+        qtbot.wait(300)
+        ftw.toggle()  # stop
+        assert ftw._frame_times == []
+        assert ftw._max_frame_time == 0.0
+        assert ftw._last_frame_time == 0.0
+        assert ftw._frame_start is None
+
+    def test_does_not_time_when_hidden(self, main_window, qtbot):
+        """Test that no timing data is collected when hidden."""
+        ftw = main_window.frame_timer_widget
+        assert not ftw.active
+        for _ in range(20):
+            QApplication.processEvents()
+        assert ftw._frame_times == []
+
+    def test_collects_frame_times_when_active(self, main_window, qtbot):
+        """Test that frame times are collected while active."""
+        ftw = main_window.frame_timer_widget
+        ftw.toggle()
+        # qtbot.wait runs the real event loop, triggering dispatcher signals
+        qtbot.wait(300)
+        assert len(ftw._frame_times) > 0
+        ftw.toggle()
+
+    def test_frame_times_below_16ms_on_empty_file(self, main_window, qtbot):
+        """Test that average frame time on an empty file is well below 16ms."""
+        ftw = main_window.frame_timer_widget
+        ftw.toggle()
+        qtbot.wait(500)
+        assert len(ftw._frame_times) > 0
+        avg = sum(ftw._frame_times) / len(ftw._frame_times)
+        assert avg < 16.0, f"Average frame time {avg:.2f}ms should be well below 16ms"
+        ftw.toggle()
+
+    def test_max_frame_time_tracked(self, main_window, qtbot):
+        """Test that max frame time is properly tracked."""
+        ftw = main_window.frame_timer_widget
+        ftw.toggle()
+        qtbot.wait(300)
+        assert ftw._max_frame_time >= 0.0
+        if ftw._frame_times:
+            assert ftw._max_frame_time == max(ftw._frame_times)
+        ftw.toggle()
+
+    def test_update_display_formats_text(self, main_window, qtbot):
+        """Test that _update_display sets label text correctly."""
+        ftw = main_window.frame_timer_widget
+        ftw.toggle()
+        qtbot.wait(300)
+        ftw._update_display()
+        text = ftw.text()
+        assert "Frame:" in text
+        assert "Avg:" in text
+        assert "Max:" in text
+        # Values show either µs or ms depending on magnitude
+        assert "µs" in text or "ms" in text
+        ftw.toggle()
+
+    def test_fmt_adaptive_format(self, qtbot):
+        """Test _fmt shows µs for sub-ms and ms for larger values."""
+        assert FrameTimerWidget._fmt(0.5) == "500µs"
+        assert FrameTimerWidget._fmt(0.001) == "1µs"
+        assert FrameTimerWidget._fmt(0.0) == "0µs"
+        assert FrameTimerWidget._fmt(1.0) == "1.0ms"
+        assert FrameTimerWidget._fmt(3.14) == "3.1ms"
+        assert FrameTimerWidget._fmt(16.7) == "16.7ms"
+
+    def test_update_display_noop_when_inactive(self, main_window, qtbot):
+        """Test that _update_display does nothing when inactive."""
+        ftw = main_window.frame_timer_widget
+        ftw.setText("unchanged")
+        ftw._update_display()
+        assert ftw.text() == "unchanged"
+
+    def test_frame_times_capped_at_1000(self, main_window, qtbot):
+        """Test that frame_times list doesn't grow unboundedly."""
+        ftw = main_window.frame_timer_widget
+        ftw.toggle()
+        # Manually inject 1001 entries
+        ftw._frame_times = [0.1] * 1001
+        # Trigger one more measurement
+        ftw._on_awake()
+        ftw._on_about_to_block()
+        assert len(ftw._frame_times) <= 1001
+        ftw.toggle()
+
+    def test_standalone_widget(self, qtbot):
+        """Test FrameTimerWidget can work standalone."""
+        ftw = FrameTimerWidget()
+        assert not ftw.active
+        ftw.toggle()
+        assert ftw.active
+        qtbot.wait(300)
+        assert len(ftw._frame_times) > 0
+        ftw.toggle()
+        assert not ftw.active
+        assert ftw._frame_times == []
+
+    def test_stop_without_start(self, qtbot):
+        """Test that stopping when already stopped doesn't crash."""
+        ftw = FrameTimerWidget()
+        ftw._stop()
+        assert not ftw.active
+
+    def test_double_start(self, qtbot):
+        """Test starting twice doesn't crash."""
+        ftw = FrameTimerWidget()
+        ftw._start()
+        ftw._start()
+        assert ftw.active
+        ftw._stop()
+
+    def test_about_to_block_without_awake(self, qtbot):
+        """Test _on_about_to_block with no prior _on_awake is safe."""
+        ftw = FrameTimerWidget()
+        ftw._active = True
+        ftw._frame_start = None
+        ftw._on_about_to_block()
+        assert ftw._frame_times == []
+
+    def test_awake_about_to_block_cycle(self, qtbot):
+        """Test a manual awake/aboutToBlock cycle records a frame time."""
+        ftw = FrameTimerWidget()
+        ftw._active = True
+        ftw._frame_times = []
+        ftw._max_frame_time = 0.0
+        ftw._on_awake()
+        assert ftw._frame_start is not None
+        ftw._on_about_to_block()
+        assert len(ftw._frame_times) == 1
+        assert ftw._frame_times[0] >= 0.0
+        assert ftw._frame_start is None
+
+
+class TestLoadContentChunked:
+    """Tests for _load_content_chunked incremental file loading."""
+
+    def test_small_content_loaded_directly(self, main_window, qtbot):
+        """Content smaller than chunk_size is loaded via setPlainText."""
+        from PyQt5.QtGui import QTextDocument
+        from PyQt5.QtWidgets import QPlainTextDocumentLayout
+        doc = QTextDocument()
+        doc.setDocumentLayout(QPlainTextDocumentLayout(doc))
+        main_window._load_content_chunked(doc, "hello world", chunk_size=1024)
+        assert doc.toPlainText() == "hello world"
+
+    def test_large_content_loaded_correctly(self, main_window, qtbot):
+        """Content larger than chunk_size is loaded in pieces and complete."""
+        from PyQt5.QtGui import QTextDocument
+        from PyQt5.QtWidgets import QPlainTextDocumentLayout
+        doc = QTextDocument()
+        doc.setDocumentLayout(QPlainTextDocumentLayout(doc))
+        content = "A" * 100_000
+        main_window._load_content_chunked(doc, content, chunk_size=8192)
+        assert doc.toPlainText() == content
+
+    def test_process_events_called_during_large_load(self, main_window, qtbot):
+        """processEvents is called between chunks so the UI stays responsive."""
+        import tempfile, os
+        content = "line\n" * 200_000  # ~1 MB, well above default 32K chunk
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt',
+                                         delete=False) as f:
+            f.write(content)
+            tmp_path = f.name
+        try:
+            call_count = 0
+            orig = QApplication.processEvents
+
+            def counting_process_events(*a, **kw):
+                nonlocal call_count
+                call_count += 1
+                return orig(*a, **kw)
+
+            with patch.object(QApplication, 'processEvents',
+                              side_effect=counting_process_events):
+                main_window._open_file_path(tmp_path)
+            assert call_count > 0, (
+                "processEvents must be called during chunked file loading"
+            )
+        finally:
+            os.unlink(tmp_path)
+
+    def test_exact_chunk_boundary(self, main_window, qtbot):
+        """Content whose length is an exact multiple of chunk_size loads correctly."""
+        from PyQt5.QtGui import QTextDocument
+        from PyQt5.QtWidgets import QPlainTextDocumentLayout
+        doc = QTextDocument()
+        doc.setDocumentLayout(QPlainTextDocumentLayout(doc))
+        chunk = 64
+        content = "B" * (chunk * 3)
+        main_window._load_content_chunked(doc, content, chunk_size=chunk)
+        assert doc.toPlainText() == content
+
+    def test_empty_content(self, main_window, qtbot):
+        """Empty content produces an empty document."""
+        from PyQt5.QtGui import QTextDocument
+        from PyQt5.QtWidgets import QPlainTextDocumentLayout
+        doc = QTextDocument()
+        doc.setDocumentLayout(QPlainTextDocumentLayout(doc))
+        main_window._load_content_chunked(doc, "")
+        assert doc.toPlainText() == ""
 
 
 if __name__ == "__main__":

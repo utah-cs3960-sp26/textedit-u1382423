@@ -6,6 +6,7 @@ Features: File editing, auto-indentation, bracket/quote matching, file tree expl
 
 import sys
 import os
+import time
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QPlainTextEdit, QWidget, QVBoxLayout,
     QHBoxLayout, QTreeView, QSplitter, QFileDialog, QMessageBox,
@@ -13,7 +14,10 @@ from PyQt5.QtWidgets import (
     QInputDialog, QShortcut, QTextEdit, QLabel, QDialog, QPushButton,
     QLineEdit, QCheckBox, QTabWidget, QTabBar, QMenu, QToolButton
 )
-from PyQt5.QtCore import Qt, QDir, QModelIndex, QRect, pyqtSignal, QObject
+from PyQt5.QtCore import (
+    Qt, QDir, QModelIndex, QRect, pyqtSignal, QObject,
+    QAbstractEventDispatcher, QTimer
+)
 from PyQt5.QtGui import (
     QFont, QColor, QPainter, QTextFormat, QKeySequence,
     QTextCursor, QTextCharFormat, QBrush, QPen, QSyntaxHighlighter,
@@ -352,24 +356,27 @@ class FindReplaceDialog(QDialog):
         replacement_count = 0
         current_pos = 0
         
-        # Keep replacing until no more matches found
-        while True:
-            # Create cursor at current position
-            find_cursor = QTextCursor(document)
-            find_cursor.setPosition(current_pos)
-            
-            # Find next occurrence
-            found = document.find(search_text, find_cursor, flags)
-            if found.isNull():
-                break
-            
-            # Replace the found text
-            found.removeSelectedText()
-            found.insertText(replacement_text)
-            
-            # Move position past the replacement for next search
-            current_pos = found.position()
-            replacement_count += 1
+        # Use a single edit block so the entire replace-all is one undo
+        # operation and the document only relayouts/rehighlights once,
+        # preventing the UI from freezing on large files.
+        edit_cursor = QTextCursor(document)
+        edit_cursor.beginEditBlock()
+        try:
+            while True:
+                find_cursor = QTextCursor(document)
+                find_cursor.setPosition(current_pos)
+                
+                found = document.find(search_text, find_cursor, flags)
+                if found.isNull():
+                    break
+                
+                found.removeSelectedText()
+                found.insertText(replacement_text)
+                
+                current_pos = found.position()
+                replacement_count += 1
+        finally:
+            edit_cursor.endEditBlock()
         
         self.status_label.setText(f"Replaced {replacement_count} instance(s)")
 
@@ -2066,6 +2073,115 @@ class FileTreeView(QTreeView):
                     self.collapse(child_index)
 
 
+class FrameTimerWidget(QLabel):
+    """Displays last, average, and max frame timings, excluding idle time.
+
+    Uses QAbstractEventDispatcher signals (awake / aboutToBlock) so that
+    only the time spent actually processing events is measured.  When hidden
+    the timer disconnects from the dispatcher and all statistics are reset.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._frame_times = []
+        self._max_frame_time = 0.0
+        self._last_frame_time = 0.0
+        self._frame_start = None
+        self._active = False
+
+        self._update_timer = QTimer(self)
+        self._update_timer.setInterval(200)
+        self._update_timer.timeout.connect(self._update_display)
+
+        self.setStyleSheet(
+            "QLabel { color: #00ff00; background: #1a1a1a; "
+            "padding: 2px 6px; font-family: monospace; font-size: 11px; }"
+        )
+        self.hide()
+
+    def toggle(self):
+        if self._active:
+            self._stop()
+        else:
+            self._start()
+
+    @property
+    def active(self):
+        return self._active
+
+    def _start(self):
+        self._active = True
+        self._frame_times = []
+        self._max_frame_time = 0.0
+        self._last_frame_time = 0.0
+        self._frame_start = None
+
+        dispatcher = QAbstractEventDispatcher.instance()
+        if dispatcher:
+            dispatcher.awake.connect(self._on_awake)
+            dispatcher.aboutToBlock.connect(self._on_about_to_block)
+
+        self._update_timer.start()
+        self.show()
+
+    def _stop(self):
+        self._active = False
+
+        dispatcher = QAbstractEventDispatcher.instance()
+        if dispatcher:
+            try:
+                dispatcher.awake.disconnect(self._on_awake)
+            except TypeError:
+                pass
+            try:
+                dispatcher.aboutToBlock.disconnect(self._on_about_to_block)
+            except TypeError:
+                pass
+
+        self._update_timer.stop()
+        self._frame_times = []
+        self._max_frame_time = 0.0
+        self._last_frame_time = 0.0
+        self._frame_start = None
+        self.hide()
+
+    def _on_awake(self):
+        if self._active:
+            self._frame_start = time.perf_counter()
+
+    def _on_about_to_block(self):
+        if self._active and self._frame_start is not None:
+            elapsed = (time.perf_counter() - self._frame_start) * 1000
+            self._last_frame_time = elapsed
+            self._frame_times.append(elapsed)
+            if len(self._frame_times) > 1000:
+                self._frame_times = self._frame_times[-500:]
+            if elapsed > self._max_frame_time:
+                self._max_frame_time = elapsed
+            self._frame_start = None
+
+    @staticmethod
+    def _fmt(ms):
+        """Format a time value adaptively: µs for < 1ms, ms otherwise."""
+        if ms < 1.0:
+            return f"{ms * 1000:.0f}µs"
+        return f"{ms:.1f}ms"
+
+    def _update_display(self):
+        if not self._active:
+            return
+        last = self._last_frame_time
+        avg = (
+            sum(self._frame_times) / len(self._frame_times)
+            if self._frame_times
+            else 0.0
+        )
+        max_t = self._max_frame_time
+        self.setText(
+            f"Frame: {self._fmt(last)} | Avg: {self._fmt(avg)} | Max: {self._fmt(max_t)}"
+        )
+
+
 class TextEditor(QMainWindow):
     """Main text editor window with tabs and split view support."""
     
@@ -2271,11 +2387,21 @@ class TextEditor(QMainWindow):
         self.statusbar = QStatusBar()
         self.setStatusBar(self.statusbar)
         self.statusbar.showMessage("Ready")
+
+        self.frame_timer_widget = FrameTimerWidget(self)
+        self.statusbar.addPermanentWidget(self.frame_timer_widget)
     
     def _setup_shortcuts(self):
         """Set up additional keyboard shortcuts."""
         redo_shortcut = QShortcut(QKeySequence("Ctrl+Y"), self)
         redo_shortcut.activated.connect(self._redo)
+
+        frame_timer_shortcut = QShortcut(QKeySequence("Ctrl+P"), self)
+        frame_timer_shortcut.activated.connect(self._toggle_frame_timer)
+
+    def _toggle_frame_timer(self):
+        """Toggle the frame timer widget on/off."""
+        self.frame_timer_widget.toggle()
     
     def _undo(self):
         if self.editor:
@@ -2770,7 +2896,7 @@ class TextEditor(QMainWindow):
         
         try:
             doc = self.doc_manager.get_or_create_document(file_path)
-            doc.document.setPlainText(content)
+            self._load_content_chunked(doc.document, content)
             doc.is_modified = False
             
             self.split_container.open_document(doc, in_new_split=in_new_split)
@@ -2780,6 +2906,31 @@ class TextEditor(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Could not open file:\n{str(e)}")
     
+    def _load_content_chunked(self, document, content, chunk_size=32768):
+        """Load content into a QTextDocument in chunks, yielding to the event loop.
+
+        For small content the text is set in one shot.  For large content the
+        text is inserted in *chunk_size*-character pieces with
+        ``QApplication.processEvents()`` called between chunks so that the
+        frame timer and the rest of the UI remain responsive.
+        """
+        if len(content) <= chunk_size:
+            document.setPlainText(content)
+            return
+
+        document.clear()
+        cursor = QTextCursor(document)
+        cursor.beginEditBlock()
+        offset = 0
+        while offset < len(content):
+            end = offset + chunk_size
+            cursor.insertText(content[offset:end])
+            offset = end
+            cursor.endEditBlock()
+            QApplication.processEvents()
+            cursor.beginEditBlock()
+        cursor.endEditBlock()
+
     def _handle_invalid_file(self, file_path):
         """Handle opening of incompatible file type."""
         QMessageBox.warning(
