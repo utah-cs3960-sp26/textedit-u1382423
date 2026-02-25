@@ -4,26 +4,26 @@ The following are the timing measurements for opening files of various sizes in 
 
 ### small.txt
 
-To open - 11 microseconds
-To quickly scroll - 11 microseconds
-To quickly scroll far away (with scroll bar) - 12 microseconds
-To find and replace (19) - 15 microseconds
+To open - 3 ms
+To quickly scroll - 2.5 ms
+To quickly scroll far away (with scroll bar) - 4 ms
+To find and replace (19) - 3 ms
 Memory usage - negligable
 
 ### medium.txt
 
-To open - 14 microseconds
-To quickly scroll - 13 microseconds
-To quickly scroll far away (with scroll bar) - 16 microseconds
-To find and replace (1186) - 13 microseconds
+To open - 22 ms
+To quickly scroll - 3 ms
+To quickly scroll far away (with scroll bar) - 4 ms
+To find and replace (1186) - 18 ms
 Memory usage - negligable
 
 ### large.txt
 
-To open - 19 microseconds
-To quickly scroll - 24 microseconds
-To quickly scroll far away (with scroll bar) - 20 microseconds
-To find and replace (668753) - 21 microseconds (failed initially)
+To open - 8188 ms
+To quickly scroll - 9 ms
+To quickly scroll far away (with scroll bar) - 23 ms
+To find and replace (668753) - 8821 ms
 Memory usage - 1.5 GiB 
 
 

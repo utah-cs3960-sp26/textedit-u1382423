@@ -2076,9 +2076,14 @@ class FileTreeView(QTreeView):
 class FrameTimerWidget(QLabel):
     """Displays last, average, and max frame timings, excluding idle time.
 
-    Uses QAbstractEventDispatcher signals (awake / aboutToBlock) so that
-    only the time spent actually processing events is measured.  When hidden
-    the timer disconnects from the dispatcher and all statistics are reset.
+    Uses a QApplication event filter to mark the start of event processing
+    and QAbstractEventDispatcher signals (awake / aboutToBlock) to mark the
+    end.  The event filter fires when the first event of a batch arrives,
+    and whichever dispatcher signal fires after event dispatch records the
+    elapsed time.  This handles both GLib-based dispatchers (where awake
+    fires after dispatch) and Unix dispatchers (where aboutToBlock fires
+    after dispatch).  When hidden the timer disconnects and all statistics
+    are reset.
     """
 
     def __init__(self, parent=None):
@@ -2121,6 +2126,10 @@ class FrameTimerWidget(QLabel):
             dispatcher.awake.connect(self._on_awake)
             dispatcher.aboutToBlock.connect(self._on_about_to_block)
 
+        app = QApplication.instance()
+        if app:
+            app.installEventFilter(self)
+
         self._update_timer.start()
         self.show()
 
@@ -2138,6 +2147,10 @@ class FrameTimerWidget(QLabel):
             except TypeError:
                 pass
 
+        app = QApplication.instance()
+        if app:
+            app.removeEventFilter(self)
+
         self._update_timer.stop()
         self._frame_times = []
         self._max_frame_time = 0.0
@@ -2145,20 +2158,33 @@ class FrameTimerWidget(QLabel):
         self._frame_start = None
         self.hide()
 
-    def _on_awake(self):
-        if self._active:
+    def eventFilter(self, obj, event):
+        """Mark the start of event processing when the first event arrives."""
+        if self._active and self._frame_start is None:
             self._frame_start = time.perf_counter()
+        return False
+
+    def _on_awake(self):
+        self._try_record_frame()
 
     def _on_about_to_block(self):
+        self._try_record_frame()
+
+    def _try_record_frame(self):
+        """Record a frame if we have a pending start time."""
         if self._active and self._frame_start is not None:
             elapsed = (time.perf_counter() - self._frame_start) * 1000
-            self._last_frame_time = elapsed
-            self._frame_times.append(elapsed)
-            if len(self._frame_times) > 1000:
-                self._frame_times = self._frame_times[-500:]
-            if elapsed > self._max_frame_time:
-                self._max_frame_time = elapsed
+            self._record_frame_time(elapsed)
             self._frame_start = None
+
+    def _record_frame_time(self, elapsed_ms):
+        """Record a single frame time measurement."""
+        self._last_frame_time = elapsed_ms
+        self._frame_times.append(elapsed_ms)
+        if len(self._frame_times) > 1000:
+            self._frame_times = self._frame_times[-500:]
+        if elapsed_ms > self._max_frame_time:
+            self._max_frame_time = elapsed_ms
 
     @staticmethod
     def _fmt(ms):
@@ -2895,6 +2921,10 @@ class TextEditor(QMainWindow):
             return
         
         try:
+            ftw = self.frame_timer_widget
+            if ftw.active:
+                ftw._frame_start = time.perf_counter()
+
             doc = self.doc_manager.get_or_create_document(file_path)
             self._load_content_chunked(doc.document, content)
             doc.is_modified = False
@@ -2907,29 +2937,12 @@ class TextEditor(QMainWindow):
             QMessageBox.critical(self, "Error", f"Could not open file:\n{str(e)}")
     
     def _load_content_chunked(self, document, content, chunk_size=32768):
-        """Load content into a QTextDocument in chunks, yielding to the event loop.
+        """Load content into a QTextDocument.
 
-        For small content the text is set in one shot.  For large content the
-        text is inserted in *chunk_size*-character pieces with
-        ``QApplication.processEvents()`` called between chunks so that the
-        frame timer and the rest of the UI remain responsive.
+        The content is set in one shot so that the frame timer accurately
+        captures the full cost of loading the file.
         """
-        if len(content) <= chunk_size:
-            document.setPlainText(content)
-            return
-
-        document.clear()
-        cursor = QTextCursor(document)
-        cursor.beginEditBlock()
-        offset = 0
-        while offset < len(content):
-            end = offset + chunk_size
-            cursor.insertText(content[offset:end])
-            offset = end
-            cursor.endEditBlock()
-            QApplication.processEvents()
-            cursor.beginEditBlock()
-        cursor.endEditBlock()
+        document.setPlainText(content)
 
     def _handle_invalid_file(self, file_path):
         """Handle opening of incompatible file type."""

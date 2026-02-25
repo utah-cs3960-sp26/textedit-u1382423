@@ -6,6 +6,7 @@ Run with: QT_QPA_PLATFORM=offscreen pytest test_text_editor.py -v
 import pytest
 import sys
 import os
+import time
 from pathlib import Path
 
 # Add parent directory to path for text_editor import
@@ -3088,23 +3089,40 @@ class TestFrameTimerWidget:
         assert ftw.active
         ftw._stop()
 
-    def test_about_to_block_without_awake(self, qtbot):
-        """Test _on_about_to_block with no prior _on_awake is safe."""
+    def test_try_record_without_frame_start(self, qtbot):
+        """Test _try_record_frame with no prior _frame_start is safe."""
         ftw = FrameTimerWidget()
         ftw._active = True
         ftw._frame_start = None
-        ftw._on_about_to_block()
+        ftw._try_record_frame()
         assert ftw._frame_times == []
 
-    def test_awake_about_to_block_cycle(self, qtbot):
-        """Test a manual awake/aboutToBlock cycle records a frame time."""
+    def test_event_filter_sets_frame_start(self, qtbot):
+        """Test that eventFilter sets _frame_start when None."""
+        from PyQt5.QtCore import QEvent
+        ftw = FrameTimerWidget()
+        ftw._active = True
+        ftw._frame_start = None
+        ftw.eventFilter(None, QEvent(QEvent.Timer))
+        assert ftw._frame_start is not None
+
+    def test_event_filter_does_not_overwrite(self, qtbot):
+        """Test that eventFilter does not overwrite existing _frame_start."""
+        from PyQt5.QtCore import QEvent
+        ftw = FrameTimerWidget()
+        ftw._active = True
+        ftw._frame_start = 12345.0
+        ftw.eventFilter(None, QEvent(QEvent.Timer))
+        assert ftw._frame_start == 12345.0
+
+    def test_try_record_frame_records_and_clears(self, qtbot):
+        """Test that _try_record_frame records elapsed time and clears start."""
         ftw = FrameTimerWidget()
         ftw._active = True
         ftw._frame_times = []
         ftw._max_frame_time = 0.0
-        ftw._on_awake()
-        assert ftw._frame_start is not None
-        ftw._on_about_to_block()
+        ftw._frame_start = time.perf_counter()
+        ftw._try_record_frame()
         assert len(ftw._frame_times) == 1
         assert ftw._frame_times[0] >= 0.0
         assert ftw._frame_start is None
@@ -3132,29 +3150,19 @@ class TestLoadContentChunked:
         main_window._load_content_chunked(doc, content, chunk_size=8192)
         assert doc.toPlainText() == content
 
-    def test_process_events_called_during_large_load(self, main_window, qtbot):
-        """processEvents is called between chunks so the UI stays responsive."""
+    def test_large_file_loads_without_process_events(self, main_window, qtbot):
+        """Large content is loaded in one shot (no processEvents splitting)."""
         import tempfile, os
-        content = "line\n" * 200_000  # ~1 MB, well above default 32K chunk
+        content = "line\n" * 200_000  # ~1 MB
         with tempfile.NamedTemporaryFile(mode='w', suffix='.txt',
                                          delete=False) as f:
             f.write(content)
             tmp_path = f.name
         try:
-            call_count = 0
-            orig = QApplication.processEvents
-
-            def counting_process_events(*a, **kw):
-                nonlocal call_count
-                call_count += 1
-                return orig(*a, **kw)
-
-            with patch.object(QApplication, 'processEvents',
-                              side_effect=counting_process_events):
-                main_window._open_file_path(tmp_path)
-            assert call_count > 0, (
-                "processEvents must be called during chunked file loading"
-            )
+            main_window._open_file_path(tmp_path)
+            pane = main_window.editor
+            assert pane is not None
+            assert pane.toPlainText() == content
         finally:
             os.unlink(tmp_path)
 
@@ -3177,6 +3185,53 @@ class TestLoadContentChunked:
         doc.setDocumentLayout(QPlainTextDocumentLayout(doc))
         main_window._load_content_chunked(doc, "")
         assert doc.toPlainText() == ""
+
+
+class TestFrameTimerIdleExclusion:
+    """Verify the frame timer correctly excludes idle time and captures work."""
+
+    def test_idle_time_excluded(self, main_window, qtbot):
+        """Frame timer should show fast times on an empty file (idle excluded)."""
+        ftw = main_window.frame_timer_widget
+        ftw.toggle()
+        qtbot.wait(500)
+        assert len(ftw._frame_times) > 0
+        avg = sum(ftw._frame_times) / len(ftw._frame_times)
+        assert avg < 16.0, f"Average frame time {avg:.2f}ms should be well below 16ms"
+        ftw.toggle()
+
+    def test_explicit_frame_start_captured(self, main_window, qtbot):
+        """Explicitly setting _frame_start before expensive work is captured
+        by the next awake or aboutToBlock signal."""
+        ftw = main_window.frame_timer_widget
+        ftw._active = True
+        ftw._frame_times = []
+        ftw._max_frame_time = 0.0
+        ftw._frame_start = time.perf_counter()
+        # Simulate awake/aboutToBlock recording
+        ftw._try_record_frame()
+        assert len(ftw._frame_times) == 1
+        assert ftw._frame_start is None
+
+    def test_file_open_sets_frame_start(self, main_window, qtbot):
+        """Opening a file explicitly sets _frame_start for the frame timer."""
+        import tempfile, os
+        ftw = main_window.frame_timer_widget
+        ftw.toggle()
+        ftw._frame_times = []
+        ftw._max_frame_time = 0.0
+        content = "x" * 100_000
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt',
+                                         delete=False) as f:
+            f.write(content)
+            tmp_path = f.name
+        try:
+            main_window._open_file_path(tmp_path)
+            qtbot.wait(300)
+            assert ftw._max_frame_time > 0.0
+        finally:
+            os.unlink(tmp_path)
+            ftw.toggle()
 
 
 if __name__ == "__main__":
