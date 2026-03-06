@@ -2091,6 +2091,7 @@ class FrameTimerWidget(QLabel):
         self._frame_times = []
         self._max_frame_time = 0.0
         self._last_frame_time = 0.0
+        self._dropped_frames = 0
         self._frame_start = None
         self._active = False
 
@@ -2119,6 +2120,7 @@ class FrameTimerWidget(QLabel):
         self._frame_times = []
         self._max_frame_time = 0.0
         self._last_frame_time = 0.0
+        self._dropped_frames = 0
         self._frame_start = None
 
         dispatcher = QAbstractEventDispatcher.instance()
@@ -2155,6 +2157,7 @@ class FrameTimerWidget(QLabel):
         self._frame_times = []
         self._max_frame_time = 0.0
         self._last_frame_time = 0.0
+        self._dropped_frames = 0
         self._frame_start = None
         self.hide()
 
@@ -2185,6 +2188,8 @@ class FrameTimerWidget(QLabel):
             self._frame_times = self._frame_times[-500:]
         if elapsed_ms > self._max_frame_time:
             self._max_frame_time = elapsed_ms
+        if elapsed_ms > 16.0:
+            self._dropped_frames += 1
 
     @staticmethod
     def _fmt(ms):
@@ -2203,8 +2208,9 @@ class FrameTimerWidget(QLabel):
             else 0.0
         )
         max_t = self._max_frame_time
+        dropped = self._dropped_frames
         self.setText(
-            f"Frame: {self._fmt(last)} | Avg: {self._fmt(avg)} | Max: {self._fmt(max_t)}"
+            f"Frame: {self._fmt(last)} | Avg: {self._fmt(avg)} | Max: {self._fmt(max_t)} | Dropped: {dropped}"
         )
 
 

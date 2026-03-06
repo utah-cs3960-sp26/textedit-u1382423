@@ -2982,6 +2982,7 @@ class TestFrameTimerWidget:
         assert ftw._frame_times == []
         assert ftw._max_frame_time == 0.0
         assert ftw._last_frame_time == 0.0
+        assert ftw._dropped_frames == 0
         assert ftw._frame_start is None
 
     def test_does_not_time_when_hidden(self, main_window, qtbot):
@@ -3031,6 +3032,7 @@ class TestFrameTimerWidget:
         assert "Frame:" in text
         assert "Avg:" in text
         assert "Max:" in text
+        assert "Dropped:" in text
         # Values show either µs or ms depending on magnitude
         assert "µs" in text or "ms" in text
         ftw.toggle()
@@ -3126,6 +3128,61 @@ class TestFrameTimerWidget:
         assert len(ftw._frame_times) == 1
         assert ftw._frame_times[0] >= 0.0
         assert ftw._frame_start is None
+
+    def test_dropped_frames_initial_zero(self, qtbot):
+        """Test that dropped frames counter starts at zero."""
+        ftw = FrameTimerWidget()
+        assert ftw._dropped_frames == 0
+
+    def test_dropped_frames_not_counted_under_16ms(self, qtbot):
+        """Test that frames at or below 16ms are not counted as dropped."""
+        ftw = FrameTimerWidget()
+        ftw._active = True
+        ftw._record_frame_time(15.0)
+        ftw._record_frame_time(16.0)
+        ftw._record_frame_time(0.5)
+        assert ftw._dropped_frames == 0
+
+    def test_dropped_frames_counted_over_16ms(self, qtbot):
+        """Test that frames over 16ms are counted as dropped."""
+        ftw = FrameTimerWidget()
+        ftw._active = True
+        ftw._record_frame_time(16.1)
+        assert ftw._dropped_frames == 1
+        ftw._record_frame_time(20.0)
+        assert ftw._dropped_frames == 2
+        ftw._record_frame_time(100.0)
+        assert ftw._dropped_frames == 3
+
+    def test_dropped_frames_reset_on_stop(self, qtbot):
+        """Test that dropped frames counter resets when timer is stopped."""
+        ftw = FrameTimerWidget()
+        ftw._start()
+        ftw._record_frame_time(20.0)
+        assert ftw._dropped_frames == 1
+        ftw._stop()
+        assert ftw._dropped_frames == 0
+
+    def test_dropped_frames_shown_in_display(self, main_window, qtbot):
+        """Test that the display text includes the dropped frames count."""
+        ftw = main_window.frame_timer_widget
+        ftw.toggle()
+        ftw._record_frame_time(20.0)
+        ftw._update_display()
+        text = ftw.text()
+        assert "Dropped: 1" in text
+        ftw.toggle()
+
+    def test_dropped_frames_reset_on_restart(self, qtbot):
+        """Test that dropped frames counter resets on fresh start."""
+        ftw = FrameTimerWidget()
+        ftw._start()
+        ftw._record_frame_time(50.0)
+        assert ftw._dropped_frames == 1
+        ftw._stop()
+        ftw._start()
+        assert ftw._dropped_frames == 0
+        ftw._stop()
 
 
 class TestLoadContentChunked:
