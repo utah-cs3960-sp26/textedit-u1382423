@@ -1149,7 +1149,7 @@ class TestFindReplaceDialog:
     
     @pytest.mark.timeout(30)
     def test_replace_all_large_file_performance(self, main_window, find_replace_dialog, qtbot):
-        """Test replace all on a large file completes quickly without freezing."""
+        """Test replace all on a large file completes correctly."""
         # Build a large document with many occurrences of the search term
         line = "foo bar baz foo qux foo\n"
         large_text = line * 5000  # ~120k chars, 15000 occurrences of "foo"
@@ -1158,17 +1158,17 @@ class TestFindReplaceDialog:
         find_replace_dialog.find_input.setText("foo")
         find_replace_dialog.replace_input.setText("replaced")
         
-        import time
-        start = time.time()
         find_replace_dialog.replace_all()
-        elapsed = time.time() - start
+        # Allow async singleShot batches to complete
+        qtbot.waitUntil(
+            lambda: "Replaced" in find_replace_dialog.status_label.text(),
+            timeout=15000,
+        )
         
         text = main_window.editor.toPlainText()
         assert "foo" not in text
         assert text.count("replaced") == 15000
         assert "15000" in find_replace_dialog.status_label.text()
-        # Should complete in under 15 seconds even on slow CI
-        assert elapsed < 15, f"replace_all took {elapsed:.1f}s, expected < 15s"
     
     @pytest.mark.timeout(30)
     def test_replace_all_single_undo_block(self, main_window, find_replace_dialog, qtbot):
@@ -3205,10 +3205,12 @@ class TestLoadContentChunked:
         doc.setDocumentLayout(QPlainTextDocumentLayout(doc))
         content = "A" * 100_000
         main_window._load_content_chunked(doc, content, chunk_size=8192)
+        # Allow singleShot callbacks to finish loading all chunks
+        qtbot.wait(2000)
         assert doc.toPlainText() == content
 
-    def test_large_file_loads_without_process_events(self, main_window, qtbot):
-        """Large content is loaded in one shot (no processEvents splitting)."""
+    def test_large_file_loads_correctly(self, main_window, qtbot):
+        """Large content is loaded in chunks via singleShot and is complete."""
         import tempfile, os
         content = "line\n" * 200_000  # ~1 MB
         with tempfile.NamedTemporaryFile(mode='w', suffix='.txt',
@@ -3217,6 +3219,8 @@ class TestLoadContentChunked:
             tmp_path = f.name
         try:
             main_window._open_file_path(tmp_path)
+            # Allow singleShot callbacks to finish loading all chunks
+            qtbot.wait(2000)
             pane = main_window.editor
             assert pane is not None
             assert pane.toPlainText() == content
@@ -3232,6 +3236,7 @@ class TestLoadContentChunked:
         chunk = 64
         content = "B" * (chunk * 3)
         main_window._load_content_chunked(doc, content, chunk_size=chunk)
+        qtbot.wait(1000)
         assert doc.toPlainText() == content
 
     def test_empty_content(self, main_window, qtbot):
@@ -3242,6 +3247,69 @@ class TestLoadContentChunked:
         doc.setDocumentLayout(QPlainTextDocumentLayout(doc))
         main_window._load_content_chunked(doc, "")
         assert doc.toPlainText() == ""
+
+
+class TestSingleShotResponsiveness:
+    """Tests that QTimer.singleShot keeps the UI responsive during heavy operations."""
+
+    @pytest.mark.timeout(30)
+    def test_large_load_is_async(self, main_window, qtbot):
+        """Large content loading via singleShot is asynchronous — not all
+        content is available immediately after the call returns."""
+        from PyQt5.QtGui import QTextDocument
+        from PyQt5.QtWidgets import QPlainTextDocumentLayout
+        doc = QTextDocument()
+        doc.setDocumentLayout(QPlainTextDocumentLayout(doc))
+        content = "A" * 100_000
+        main_window._load_content_chunked(doc, content, chunk_size=8192)
+        # Immediately after, not all content is present yet
+        initial_len = len(doc.toPlainText())
+        # After waiting, it should all be there
+        qtbot.wait(2000)
+        assert doc.toPlainText() == content
+        # The initial load should have been partial (less than full)
+        assert initial_len < len(content)
+
+    @pytest.mark.timeout(30)
+    def test_small_load_is_sync(self, main_window, qtbot):
+        """Small content is loaded synchronously in one shot."""
+        from PyQt5.QtGui import QTextDocument
+        from PyQt5.QtWidgets import QPlainTextDocumentLayout
+        doc = QTextDocument()
+        doc.setDocumentLayout(QPlainTextDocumentLayout(doc))
+        main_window._load_content_chunked(doc, "hello", chunk_size=1024)
+        assert doc.toPlainText() == "hello"
+
+    @pytest.mark.timeout(30)
+    def test_replace_all_async_large_batch(self, main_window, qtbot):
+        """replace_all shows intermediate 'Replacing…' status for large batches."""
+        line = "foo bar baz foo qux foo\n"
+        large_text = line * 1000  # 3000 occurrences
+        main_window.editor.setPlainText(large_text)
+        dialog = FindReplaceDialog(main_window)
+        dialog.find_input.setText("foo")
+        dialog.replace_input.setText("x")
+        dialog.replace_all()
+        # After first batch, status should show intermediate progress
+        status = dialog.status_label.text()
+        assert "so far" in status or "Replaced" in status
+        # Wait for completion
+        qtbot.waitUntil(
+            lambda: "Replaced" in dialog.status_label.text(),
+            timeout=10000,
+        )
+        assert "foo" not in main_window.editor.toPlainText()
+
+    @pytest.mark.timeout(30)
+    def test_replace_all_small_sync(self, main_window, qtbot):
+        """Small replace_all completes synchronously in one batch."""
+        main_window.editor.setPlainText("foo bar foo")
+        dialog = FindReplaceDialog(main_window)
+        dialog.find_input.setText("foo")
+        dialog.replace_input.setText("x")
+        dialog.replace_all()
+        assert main_window.editor.toPlainText() == "x bar x"
+        assert "Replaced 2" in dialog.status_label.text()
 
 
 class TestFrameTimerIdleExclusion:

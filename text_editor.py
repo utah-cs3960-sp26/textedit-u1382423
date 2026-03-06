@@ -174,6 +174,8 @@ class DocumentManager(QObject):
 class FindReplaceDialog(QDialog):
     """Dialog for finding and replacing text with traverse and case sensitivity options."""
     
+    _REPLACE_ALL_BATCH = 500
+    
     def __init__(self, parent=None):
         super().__init__(parent)
         self.parent_window = parent
@@ -334,7 +336,11 @@ class FindReplaceDialog(QDialog):
             self.status_label.setText("No text selected to replace")
     
     def replace_all(self):
-        """Replace all instances of search text."""
+        """Replace all instances of search text.
+
+        Uses QTimer.singleShot(0) every *_REPLACE_ALL_BATCH* replacements
+        to yield back to the event loop and keep the UI responsive.
+        """
         if not self.editor:
             return
         
@@ -353,32 +359,38 @@ class FindReplaceDialog(QDialog):
         else:
             flags = QTextDocument.FindFlags()
         
-        replacement_count = 0
-        current_pos = 0
-        
-        # Use a single edit block so the entire replace-all is one undo
-        # operation and the document only relayouts/rehighlights once,
-        # preventing the UI from freezing on large files.
-        edit_cursor = QTextCursor(document)
-        edit_cursor.beginEditBlock()
-        try:
-            while True:
-                find_cursor = QTextCursor(document)
-                find_cursor.setPosition(current_pos)
-                
-                found = document.find(search_text, find_cursor, flags)
-                if found.isNull():
-                    break
-                
-                found.removeSelectedText()
-                found.insertText(replacement_text)
-                
-                current_pos = found.position()
-                replacement_count += 1
-        finally:
-            edit_cursor.endEditBlock()
-        
-        self.status_label.setText(f"Replaced {replacement_count} instance(s)")
+        batch_size = self._REPLACE_ALL_BATCH
+        state = {"count": 0, "pos": 0}
+
+        def _do_batch():
+            edit_cursor = QTextCursor(document)
+            edit_cursor.beginEditBlock()
+            try:
+                for _ in range(batch_size):
+                    find_cursor = QTextCursor(document)
+                    find_cursor.setPosition(state["pos"])
+
+                    found = document.find(search_text, find_cursor, flags)
+                    if found.isNull():
+                        self.status_label.setText(
+                            f"Replaced {state['count']} instance(s)"
+                        )
+                        return
+
+                    found.removeSelectedText()
+                    found.insertText(replacement_text)
+
+                    state["pos"] = found.position()
+                    state["count"] += 1
+            finally:
+                edit_cursor.endEditBlock()
+
+            self.status_label.setText(
+                f"Replacing… {state['count']} so far"
+            )
+            QTimer.singleShot(0, _do_batch)
+
+        _do_batch()
 
 
 class StripedOverlay(QWidget):
@@ -2943,12 +2955,28 @@ class TextEditor(QMainWindow):
             QMessageBox.critical(self, "Error", f"Could not open file:\n{str(e)}")
     
     def _load_content_chunked(self, document, content, chunk_size=32768):
-        """Load content into a QTextDocument.
+        """Load content into a QTextDocument in chunks.
 
-        The content is set in one shot so that the frame timer accurately
-        captures the full cost of loading the file.
+        For small content (<= chunk_size), loads in one shot.  For large
+        content, inserts in chunks scheduled via QTimer.singleShot(0) so
+        the event loop can process paint/input events between chunks.
         """
-        document.setPlainText(content)
+        if len(content) <= chunk_size:
+            document.setPlainText(content)
+            return
+
+        document.clear()
+        cursor = QTextCursor(document)
+        offsets = list(range(0, len(content), chunk_size))
+
+        def _insert_next(idx=0):
+            if idx >= len(offsets):
+                return
+            start = offsets[idx]
+            cursor.insertText(content[start:start + chunk_size])
+            QTimer.singleShot(0, lambda: _insert_next(idx + 1))
+
+        _insert_next()
 
     def _handle_invalid_file(self, file_path):
         """Handle opening of incompatible file type."""
