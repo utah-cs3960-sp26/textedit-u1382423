@@ -3311,6 +3311,71 @@ class TestSingleShotResponsiveness:
         assert main_window.editor.toPlainText() == "x bar x"
         assert "Replaced 2" in dialog.status_label.text()
 
+    @pytest.mark.timeout(30)
+    def test_large_file_no_asterisk_after_load(self, main_window, qtbot):
+        """Opening a large file should not show a modified asterisk once loading completes."""
+        import tempfile, os
+        content = "line\n" * 50_000
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt',
+                                         delete=False) as f:
+            f.write(content)
+            tmp_path = f.name
+        try:
+            main_window._open_file_path(tmp_path)
+            qtbot.wait(3000)
+            doc = main_window.editor.doc
+            assert not doc.is_modified
+            assert "*" not in doc.display_name
+        finally:
+            os.unlink(tmp_path)
+
+    @pytest.mark.timeout(30)
+    def test_on_complete_callback_called(self, main_window, qtbot):
+        """on_complete callback fires after all chunks are loaded."""
+        from PyQt5.QtGui import QTextDocument
+        from PyQt5.QtWidgets import QPlainTextDocumentLayout
+        doc = QTextDocument()
+        doc.setDocumentLayout(QPlainTextDocumentLayout(doc))
+        result = [False]
+        def mark_done():
+            result[0] = True
+        content = "A" * 100_000
+        main_window._load_content_chunked(doc, content, chunk_size=8192,
+                                          on_complete=mark_done)
+        qtbot.waitUntil(lambda: result[0], timeout=5000)
+        assert doc.toPlainText() == content
+
+    @pytest.mark.timeout(30)
+    def test_on_complete_called_for_small_content(self, main_window, qtbot):
+        """on_complete fires immediately for small (sync) loads."""
+        from PyQt5.QtGui import QTextDocument
+        from PyQt5.QtWidgets import QPlainTextDocumentLayout
+        doc = QTextDocument()
+        doc.setDocumentLayout(QPlainTextDocumentLayout(doc))
+        result = [False]
+        main_window._load_content_chunked(doc, "hi", chunk_size=1024,
+                                          on_complete=lambda: result.__setitem__(0, True))
+        assert result[0]
+
+    @pytest.mark.timeout(30)
+    def test_replace_all_single_undo_across_batches(self, main_window, qtbot):
+        """A multi-batch replace_all can be fully undone with a single undo."""
+        line = "foo bar baz foo qux foo\n"
+        large_text = line * 1000  # 3000 occurrences, multiple batches
+        main_window.editor.setPlainText(large_text)
+        dialog = FindReplaceDialog(main_window)
+        dialog.find_input.setText("foo")
+        dialog.replace_input.setText("zzz")
+        dialog.replace_all()
+        qtbot.waitUntil(
+            lambda: "Replaced" in dialog.status_label.text(),
+            timeout=10000,
+        )
+        assert "foo" not in main_window.editor.toPlainText()
+        # Single undo should revert everything
+        main_window.editor.document().undo()
+        assert main_window.editor.toPlainText() == large_text
+
 
 class TestFrameTimerIdleExclusion:
     """Verify the frame timer correctly excludes idle time and captures work."""

@@ -360,11 +360,15 @@ class FindReplaceDialog(QDialog):
             flags = QTextDocument.FindFlags()
         
         batch_size = self._REPLACE_ALL_BATCH
-        state = {"count": 0, "pos": 0}
+        state = {"count": 0, "pos": 0, "first_batch": True}
 
         def _do_batch():
             edit_cursor = QTextCursor(document)
-            edit_cursor.beginEditBlock()
+            if state["first_batch"]:
+                edit_cursor.beginEditBlock()
+                state["first_batch"] = False
+            else:
+                edit_cursor.joinPreviousEditBlock()
             try:
                 for _ in range(batch_size):
                     find_cursor = QTextCursor(document)
@@ -2944,8 +2948,13 @@ class TextEditor(QMainWindow):
                 ftw._frame_start = time.perf_counter()
 
             doc = self.doc_manager.get_or_create_document(file_path)
-            self._load_content_chunked(doc.document, content)
-            doc.is_modified = False
+
+            def _on_load_complete():
+                doc.is_modified = False
+                self._update_window_title()
+
+            self._load_content_chunked(doc.document, content,
+                                       on_complete=_on_load_complete)
             
             self.split_container.open_document(doc, in_new_split=in_new_split)
             self._update_window_title()
@@ -2954,15 +2963,21 @@ class TextEditor(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Could not open file:\n{str(e)}")
     
-    def _load_content_chunked(self, document, content, chunk_size=32768):
+    def _load_content_chunked(self, document, content, chunk_size=32768,
+                              on_complete=None):
         """Load content into a QTextDocument in chunks.
 
         For small content (<= chunk_size), loads in one shot.  For large
         content, inserts in chunks scheduled via QTimer.singleShot(0) so
         the event loop can process paint/input events between chunks.
+
+        *on_complete* is called (with no arguments) after all chunks have
+        been inserted.
         """
         if len(content) <= chunk_size:
             document.setPlainText(content)
+            if on_complete:
+                on_complete()
             return
 
         document.clear()
@@ -2971,6 +2986,8 @@ class TextEditor(QMainWindow):
 
         def _insert_next(idx=0):
             if idx >= len(offsets):
+                if on_complete:
+                    on_complete()
                 return
             start = offsets[idx]
             cursor.insertText(content[start:start + chunk_size])
