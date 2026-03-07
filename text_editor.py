@@ -162,6 +162,8 @@ class DocumentManager(QObject):
                 if normalized in self._path_to_document:
                     del self._path_to_document[normalized]
             self.document_closed.emit(doc)
+            doc.document.clear()
+            doc.deleteLater()
     
     @property
     def documents(self):

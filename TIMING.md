@@ -31,25 +31,27 @@ Memory usage - 1.5 GiB
 
 ### small.txt
 
-To open - # microseconds
-To quickly scroll - # microseconds
-To quickly scroll far away (with scroll bar) - # microseconds
-To find and replace (19) - # microseconds
+To open - 8 milliseconds
+To quickly scroll - 6 milliseconds
+To quickly scroll far away (with scroll bar) - 6 milliseconds
+To find and replace (19) - 11 milliseconds
 Memory usage - negligable
 
 ### medium.txt
 
-To open - # microseconds
-To quickly scroll - # microseconds
-To quickly scroll far away (with scroll bar) - # microseconds
-To find and replace (1186) - # microseconds
-Memory usage - negligable
+To open - 17 milliseconds (1 dropped frames)
+To quickly scroll - 7 milliseconds
+To quickly scroll far away (with scroll bar) - 12 milliseconds
+To find and replace (1186) - 28 milliseconds (2 dropped frames)
+Memory usage - 0.1 GiB
 
 ### large.txt
 
-To open - # microseconds
-To quickly scroll - # microseconds
-To quickly scroll far away (with scroll bar) - # microseconds
-To find and replace (668753) - # microseconds (failed initially)
-Memory usage - # GiB 
+To open -  30 milliseconds (6 dropped frames)
+To quickly scroll - 16 milliseconds
+To quickly scroll far away (with scroll bar) - 78 milliseconds (20 dropped frames)
+To find and replace (668753) - 600 milliseconds (20 dropped frames)
+Memory usage - 1.5 GiB 
 
+#### Memory note:
+I was saving a file document in memory as long as that file instance was being referenced. So even if I closed a file, that file document may (and was) still stored in memory.

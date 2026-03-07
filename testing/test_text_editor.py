@@ -3424,5 +3424,62 @@ class TestFrameTimerIdleExclusion:
             ftw.toggle()
 
 
+class TestCloseDocumentClearsContent:
+    """Test that closing a document frees its content so reopening doesn't duplicate memory."""
+
+    def test_close_document_clears_text(self, tmp_path):
+        """After close_document, the QTextDocument content should be cleared."""
+        mgr = DocumentManager()
+        file_path = str(tmp_path / "big.txt")
+        with open(file_path, 'w') as f:
+            f.write("A" * 10000)
+
+        doc = mgr.get_or_create_document(file_path)
+        doc.document.setPlainText("A" * 10000)
+        assert len(doc.document.toPlainText()) == 10000
+
+        mgr.close_document(doc)
+        assert len(doc.document.toPlainText()) == 0
+
+    def test_reopen_file_creates_new_document(self, tmp_path):
+        """Reopening a file after close should create a distinct Document."""
+        mgr = DocumentManager()
+        file_path = str(tmp_path / "test.txt")
+        with open(file_path, 'w') as f:
+            f.write("hello")
+
+        doc1 = mgr.get_or_create_document(file_path)
+        mgr.close_document(doc1)
+        assert mgr.get_document_by_path(file_path) is None
+
+        doc2 = mgr.get_or_create_document(file_path)
+        assert doc2 is not doc1
+        assert len(mgr.documents) == 1
+
+    @pytest.mark.timeout(10)
+    def test_reopen_file_in_main_window(self, main_window, tmp_path, qtbot):
+        """Opening, closing, and reopening a file should not accumulate documents."""
+        file_path = str(tmp_path / "sample.txt")
+        with open(file_path, 'w') as f:
+            f.write("content")
+
+        initial_count = len(main_window.doc_manager.documents)
+
+        main_window._open_file_path(file_path)
+        assert len(main_window.doc_manager.documents) == initial_count + 1
+
+        # Close the tab for our file
+        tw = main_window.split_container.active_tab_widget()
+        idx = tw.count() - 1
+        main_window.split_container._on_tab_close_requested(tw, idx)
+
+        assert main_window.doc_manager.get_document_by_path(file_path) is None
+        assert len(main_window.doc_manager.documents) == initial_count
+
+        # Reopen — should create a fresh document, not a duplicate
+        main_window._open_file_path(file_path)
+        assert len(main_window.doc_manager.documents) == initial_count + 1
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
